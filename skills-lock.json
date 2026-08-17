@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "ohos-app-dev": {
+      "source": "eclipse-oniro4openharmony/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/ohos-app-dev/SKILL.md",
+      "computedHash": "cbeddc81575f04ba2bf91882e927277d04b704a736735b56946c94451787dd5f"
+    }
+  }
+}

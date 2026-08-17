@@ -1,0 +1,136 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["phone", "tablet", "2in1", "car"],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:location_permission_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        },
+        "reasonId": 16777225
+      },
+      {
+        "name": "ohos.permission.LOCATION",
+        "reason": "$string:location_permission_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        },
+        "reasonId": 16777225
+      },
+      {
+        "name": "ohos.permission.CAMERA",
+        "reason": "$string:camera_permission_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        },
+        "reasonId": 16777222
+      },
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:mic_permission_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        },
+        "reasonId": 16777226
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "reason": "$string:keep_background_running_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        },
+        "reasonId": 16777224
+      },
+      {
+        "name": "ohos.permission.STORE_PERSISTENT_DATA",
+        "reason": "$string:store_persistent_data_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        },
+        "reasonId": 16777228
+      },
+      {
+        "name": "ohos.permission.DISTRIBUTED_DATASYNC",
+        "reason": "$string:distributed_datasync_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        },
+        "reasonId": 16777223
+      }
+    ],
+    "pages": "$profile:main_pages",
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "continuable": true,
+        "backgroundModes": ["voip", "audioPlayback"],
+        "skills": [
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["ohos.want.action.home"]
+          },
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["ohos.want.action.VIEW"],
+            "uris": [
+              {
+                "scheme": "whatisit",
+                "host": "provision",
+                "path": "/"
+              }
+            ]
+          }
+        ],
+        "descriptionId": 16777220,
+        "iconId": 16777219,
+        "labelId": 16777221,
+        "startWindowIconId": 16777231,
+        "startWindowBackgroundId": 16777229
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "EntryBackupAbility",
+        "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",
+        "type": "backup",
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.backup",
+            "resource": "$profile:backup_config",
+            "resourceId": 16777232
+          }
+        ]
+      }
+    ],
+    "packageName": "entry",
+    "virtualMachine": "ark24.0.0.0",
+    "compileMode": "esmodule",
+    "dependencies": [],
+    "descriptionId": 16777227
+  }
+}

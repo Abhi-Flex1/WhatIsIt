@@ -1,0 +1,25 @@
+[Unit]
+Description=WhatIsIt WhatsApp backend (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whatisit
+Group=whatisit
+WorkingDirectory=/var/lib/whatisit
+Environment=WHATSAPP_TOKEN=change-me
+Environment=DB_PATH=/var/lib/whatisit/whatsapp.db
+Environment=MEDIA_DIR=/var/lib/whatisit/media
+ExecStart=/usr/local/bin/whatisit-server
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/whatisit
+
+[Install]
+WantedBy=multi-user.target

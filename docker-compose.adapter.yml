@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  whatsMiau:
+    image: impedr029/whatsmiau:latest
+    container_name: whatsmiau
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - API_KEY=${WHATSMIAU_API_KEY:-}
+      - REDIS_URL=redis:6379
+      - DIALECT_DB=sqlite3
+      - DB_URL=file:data.db?_foreign_keys=on
+    volumes:
+      - whatsMiau-data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  adapter:
+    build: ./adapter
+    container_name: whatsmiau-adapter
+    ports:
+      - "18770:18770"
+    environment:
+      - WHATSMIAM_URL=http://whatsMiau:8080
+      - INSTANCE_ID=${INSTANCE_ID:-default}
+      - API_KEY=${ADAPTER_API_KEY:-}
+      - LISTEN_ADDR=0.0.0.0:18770
+      - STORE_PATH=/app/history.json
+      - MEDIA_DIR=/app/media
+      - MEDIA_PUBLIC_URL=http://localhost:18770/files
+    volumes:
+      - adapter-data:/app
+    depends_on:
+      - whatsMiau
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: whatsmiau-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  whatsMiau-data:
+  adapter-data:
+  redis-data:

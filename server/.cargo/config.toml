@@ -1,0 +1,11 @@
+[target.aarch64-unknown-linux-ohos]
+linker = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
+
+[target.armv7-unknown-linux-ohos]
+linker = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/armv7-unknown-linux-ohos-clang"
+
+[target.aarch64-unknown-linux-ohos.env]
+CC = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
+CXX = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang++"
+AR = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/llvm-ar.exe"
+RANLIB = "D:/deveco2026/DevEco Studio/sdk/default/openharmony/native/llvm/bin/llvm-ranlib.exe"

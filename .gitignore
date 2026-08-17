@@ -1,0 +1,33 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# Live WhatsApp session state (never commit — contains account credentials)
+*.db
+*.db-shm
+*.db-wal
+/data
+/server/data
+/media
+/server/media
+
+# Local toolchains / build caches / agent tooling
+/go
+/engine
+/rustup
+/.commandcode
+/.agents
+*.dmpserver/target/
+*.exe
+server/target/
+*.exe
+*.rlib

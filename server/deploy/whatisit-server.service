@@ -1,0 +1,34 @@
+[Unit]
+Description=WhatIsIt backend (whatsapp-rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whatisit
+Group=whatisit
+WorkingDirectory=/srv/whatisit
+# The session must never be lost on crash — restart always, no auto-relaunch
+# loops (whatsapp-rust handles its own reconnect/keepalive internally).
+Restart=always
+RestartSec=5
+
+# --- Environment ---
+Environment=PORT=18770
+Environment=DB_PATH=/srv/whatisit/data/whatsmeow.db
+Environment=MEDIA_DIR=/srv/whatisit/data/media
+# REQUIRED: set the real token in /etc/whatisit.env (chmod 600).
+EnvironmentFile=/etc/whatisit.env
+
+ExecStart=/usr/local/bin/whatisit-server
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/whatisit/data
+PrivateTmp=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

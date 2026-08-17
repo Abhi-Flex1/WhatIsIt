@@ -1,0 +1,43 @@
+[package]
+name = "whatisit-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# WhatsApp protocol client (QR pairing, messages, media, history sync).
+# default-features = false avoids the nightly-only `simd` in wacore-binary;
+# we re-enable exactly the runtime/transport/storage features we need on stable.
+whatsapp-rust = { version = "0.7", default-features = false, features = [
+    "sqlite-storage",
+    "tokio-transport",
+    "tokio-runtime",
+    "ureq-client",
+    "tokio-native",
+    "signal",
+    "voip-mlow",
+] }
+
+# Async runtime + web server + WebSockets.
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower-http = { version = "0.5", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# JSON + errors.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures-util = "0.3"
+
+# Config + fs + logging.
+env_logger = "0.11"
+log = "0.4"
+bytes = "1"
+
+# Base64url for the passkey assertion transport.
+base64 = "0.22"
+
+[profile.release]
+lto = true
+strip = true

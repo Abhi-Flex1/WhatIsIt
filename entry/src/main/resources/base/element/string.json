@@ -1,0 +1,40 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "module description"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "label"
+    },
+    {
+      "name": "location_permission_reason",
+      "value": "Share your current location as a maps link in chats"
+    },
+    {
+      "name": "camera_permission_reason",
+      "value": "Use the camera for video calls"
+    },
+    {
+      "name": "mic_permission_reason",
+      "value": "Use the microphone for calls"
+    },
+    {
+      "name": "keep_background_running_reason",
+      "value": "Keep your voice and video call active while the screen is locked or you switch apps"
+    },
+    {
+      "name": "store_persistent_data_reason",
+      "value": "Keep your session secure across app updates"
+    },
+    {
+      "name": "distributed_datasync_reason",
+      "value": "Hand off your chat to another HarmonyOS device"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "whatisit",
+  "version": "1.0.0",
+  "description": "A native ArkUI app that wraps **the official WhatsApp Web** inside an ArkWeb webview. Users link their personal WhatsApp the **sanctioned** way — the real QR code or phone-number code on the real web.whatsapp.com — and the native UI (chats, threads) is driven by reading that same webview's DOM.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "typescript": "^7.0.2"
+  }
+}

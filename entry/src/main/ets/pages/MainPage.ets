@@ -1,0 +1,722 @@
+import { common, continuationManager } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { preferences } from '@kit.ArkData';
+import { curves } from '@kit.ArkUI';
+import { cdpBridge, BackendEvent } from '../services/CdpBridge';
+import { passkeyService, PasskeyState } from '../services/PasskeyService';
+import { e2ee } from '../services/E2eeService';
+import { localNotifications } from '../services/LocalNotifications';
+import { AppLifecycle } from '../services/AppLifecycle';
+import { securityBootBarrier } from '../services/SecurityBootBarrier';
+import { ChatListView } from './ChatListView';
+import { ChatThreadView } from './ChatThreadView';
+import { ServerConfig } from '../services/ServerConfig';
+
+const TAG = 'MainPage';
+const DOMAIN = 0x0000;
+
+type ShellView = 'connect' | 'chats' | 'thread';
+
+@Entry
+@Component
+struct MainPage {
+  @State view: ShellView = 'connect';
+  @State chatName: string = '';
+  @State qr: string = '';
+  @State connecting: boolean = false;
+  @State errorMsg: string = '';
+  @State showPhoneLink: boolean = false;
+  @State phoneCountry: string = '1';
+  @State phoneNumber: string = '';
+  @State pairCodeText: string = '';
+  @State pairBusy: boolean = false;
+  @State pairError: string = '';
+  @State passkeyOptions: string = '';
+  @State passkeyPending: boolean = false;
+  @State passkeyCode: string = '';
+  @State passkeyError: string = '';
+  @State assertionInput: string = '';
+  @State passkeyBusy: boolean = false;
+  @State securityBlocked: boolean = false;
+  @State showProvisionQR: boolean = false;
+  @State provisionUrl: string = '';
+  private store: preferences.Preferences | null = null;
+  private qrTimer: number | null = null;
+
+  aboutToAppear(): void {
+    // BOOT BARRIER: verify hardware integrity BEFORE any session/UI init.
+    // On a rooted / re-signed / emulated device this wipes the local
+    // credential store and shows the blocking screen instead of chats.
+    this.runSecurityGate();
+  }
+
+  private runSecurityGate(): void {
+    securityBootBarrier.runGate().then((ok: boolean) => {
+      if (!ok) {
+        this.securityBlocked = true;
+        hilog.warn(DOMAIN, TAG, 'security gate failed — app blocked');
+        return;
+      }
+      this.initApp();
+    });
+  }
+
+  private initApp(): void {
+    const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    e2ee.init(ctx);
+    localNotifications.init(ctx);
+    localNotifications.requestPermission();
+    localNotifications.clearBadge();
+    // Start the embedded engine (the "server" — in-process, no network).
+    cdpBridge.startEngine(`${ctx.filesDir}/wa`);
+    cdpBridge.setUIContext(ctx);
+    cdpBridge.openWs();
+    preferences.getPreferences(ctx, 'whatisit_cdp').then((store) => {
+      this.store = store;
+      // App Continuation resume: if we were handed off into a chat, open it.
+      const resumeChat = store.getSync('current_chat', '') as string;
+      const resumeView = store.getSync('current_view', '') as string;
+      if (resumeView === 'thread' && resumeChat.length > 0) {
+        this.chatName = resumeChat;
+        this.view = 'thread';
+        this.autoReconnect();
+        return;
+      }
+      // Provisioning deep-link: if the app was opened via a provisioning QR,
+      // auto-apply the backend URL and connect.
+      const pending = store.getSync('provision_pending', '') as string;
+      if (pending === 'true') {
+        const provHost = store.getSync('provision_host', '') as string;
+        const provPortRaw = store.getSync('provision_port', '') as string;
+        const provPort = parseInt(provPortRaw, 10);
+        store.put('provision_pending', 'false').catch(() => {});
+        if (provHost.length > 0 && isFinite(provPort) && provPort > 0) {
+          this.applyProvisioning(provHost, provPort);
+          return;
+        }
+      }
+      // Silently re-attach on return: resume chats instead of forcing a step.
+      this.autoReconnect();
+    }).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'load prefs failed: %{public}s', JSON.stringify(err));
+      this.autoReconnect();
+    });
+    // Live events: QR updates + linked + pair code.
+    cdpBridge.addEventListener((evt: BackendEvent) => {
+      if (evt.type === 'qr' && evt.qr !== undefined) {
+        this.qr = evt.qr;
+      } else if (evt.type === 'linked') {
+        this.qr = '';
+        this.view = 'chats';
+        if (this.store !== null) {
+          this.store.put('was_linked', true).catch(() => {});
+        }
+      } else if (evt.type === 'logged_out') {
+        this.qr = '';
+        this.view = 'connect';
+      } else if (evt.type === 'pair_code' && evt.code !== undefined) {
+        this.pairCodeText = evt.code;
+        this.pairBusy = false;
+      }
+    });
+    // Passkey (SHORTCAKE) verification during linking.
+    passkeyService.bind();
+    passkeyService.addListener((s: PasskeyState) => {
+      this.passkeyOptions = s.requestOptionsJson;
+      this.passkeyPending = s.pending;
+      this.passkeyCode = s.verificationCode;
+      this.passkeyError = s.error;
+    });
+  }
+
+  aboutToDisappear(): void {
+    this.stopQrPoll();
+  }
+
+  /** App came to foreground — resume polling. */
+  onPageShow(): void {
+    AppLifecycle.setForeground(true);
+    this.autoReconnect();
+  }
+
+  /** App went to background — pause polling. */
+  onPageHide(): void {
+    AppLifecycle.setForeground(false);
+    localNotifications.stop();
+  }
+
+  private stopQrPoll(): void {
+    if (this.qrTimer !== null) {
+      clearInterval(this.qrTimer);
+      this.qrTimer = null;
+    }
+  }
+
+  private startQrPoll(): void {
+    this.stopQrPoll();
+    // Poll /status every 3s while on the connect screen: the server's QR
+    // rotates (first 60s, then 20s) and WS may not be connected yet.
+    this.qrTimer = setInterval(() => {
+      if (AppLifecycle.isForeground()) {
+        this.pollStatus();
+      }
+    }, 3000);
+  }
+
+  private async pollStatus(): Promise<void> {
+    const st = await cdpBridge.getStatus();
+    if (st === null) {
+      return;
+    }
+    if (st.linked) {
+      this.qr = '';
+      this.view = 'chats';
+      this.stopQrPoll();
+    } else if (st.qr.length > 0) {
+      this.qr = st.qr;
+    }
+  }
+
+  /** Try to silently re-attach to the engine; resume chats if linked. */
+  private async autoReconnect(): Promise<void> {
+    if (this.view !== 'connect') {
+      return;
+    }
+    const linked = await cdpBridge.isLinked();
+    if (linked) {
+      this.view = 'chats';
+      if (this.store !== null) {
+        this.store.put('was_linked', true).catch(() => {});
+      }
+    } else {
+      // Not linked — start QR pairing and watch for the code.
+      await cdpBridge.startPair();
+      this.startQrPoll();
+      this.pollStatus();
+    }
+  }
+
+  private async connect(): Promise<void> {
+    this.connecting = true;
+    this.errorMsg = '';
+    const linked = await cdpBridge.isLinked();
+    this.connecting = false;
+    if (linked) {
+      this.view = 'chats';
+      localNotifications.start();
+    } else {
+      await cdpBridge.startPair();
+      this.startQrPoll();
+      this.pollStatus();
+    }
+  }
+
+  /** Apply provisioning data from a scanned QR or deep link. */
+  private async applyProvisioning(host: string, port: number): Promise<void> {
+    this.errorMsg = '';
+    const ok = await cdpBridge.provisionBackend(host, port);
+    if (ok) {
+      await cdpBridge.startPair();
+      this.startQrPoll();
+      this.pollStatus();
+    } else {
+      this.errorMsg = 'Provisioning failed. Check the backend URL and try again.';
+    }
+  }
+
+  private openThread(name: string): void {
+    this.chatName = name;
+    if (this.store !== null) {
+      this.store.put('current_chat', name).catch(() => {});
+      this.store.put('current_view', 'thread').catch(() => {});
+    }
+    this.animatedSetView('thread');
+  }
+
+  /** Request an 8-char code for the phone-number linking flow. */
+  private async startPhonePair(): Promise<void> {
+    this.pairBusy = true;
+    this.pairError = '';
+    this.pairCodeText = '';
+    const digits = this.phoneNumber.replace(/[^0-9]/g, '');
+    if (this.phoneCountry.length === 0 || digits.length < 7) {
+      this.pairError = 'Enter a valid phone number.';
+      this.pairBusy = false;
+      return;
+    }
+    try {
+      await cdpBridge.pairCode(this.phoneCountry, digits);
+    } catch (err) {
+      this.pairError = 'Failed to request code. Is the backend running?';
+      this.pairBusy = false;
+      return;
+    }
+    // Safety timeout: if no pair_code event arrives within 30s, unstick the UI.
+    setTimeout(() => {
+      if (this.pairBusy && this.pairCodeText.length === 0) {
+        this.pairError = 'No code received — check your connection and try again.';
+        this.pairBusy = false;
+      }
+    }, 30000);
+  }
+
+  /**
+   * Submit a pasted WebAuthn assertion JSON. The user obtains this from a real
+   * authenticator (this SDK has no native WebAuthn API yet); on-device
+   * passkeys will replace this once @kit ships Credential Manager.
+   */
+  private async submitPasskeyAssertion(): Promise<void> {
+    const raw = this.assertionInput.trim();
+    if (raw.length === 0) {
+      this.passkeyError = 'Paste the WebAuthn assertion JSON first.';
+      return;
+    }
+    this.passkeyBusy = true;
+    this.passkeyError = '';
+    let parsed: Record<string, Object>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, Object>;
+    } catch (e) {
+      this.passkeyBusy = false;
+      this.passkeyError = 'The pasted text is not valid JSON.';
+      return;
+    }
+    // Build the base64url payloads from the WebAuthn PublicKeyCredential shape.
+    const rawId = parsed['rawId'];
+    const credentialId = typeof rawId === 'string' ? (rawId as string) : this.extractCredentialId(parsed);
+    const ok = await passkeyService.submitAssertion(cdpBridge.b64UrlFromBytes(this.strToBytes(raw)),
+      credentialId.length > 0 ? credentialId : '');
+    this.passkeyBusy = false;
+    if (!ok) {
+      this.passkeyError = this.passkeyError.length > 0 ? this.passkeyError : 'Server rejected the assertion.';
+    }
+  }
+
+  /** rawId may already be base64url in the JSON; normalize if present. */
+  private extractCredentialId(parsed: Record<string, Object>): string {
+    const id = parsed['id'];
+    if (typeof id === 'string') {
+      return id as string;
+    }
+    return '';
+  }
+
+  private async confirmPasskey(): Promise<void> {
+    this.passkeyBusy = true;
+    const ok = await passkeyService.confirm();
+    this.passkeyBusy = false;
+    if (!ok) {
+      this.passkeyError = 'Could not confirm. Check the server, then retry.';
+    }
+  }
+
+  private async cancelPasskey(): Promise<void> {
+    await passkeyService.cancel();
+    this.assertionInput = '';
+  }
+
+  private async refreshPasskey(): Promise<void> {
+    await passkeyService.refresh();
+  }
+
+  /** ASCII/UTF-8 string → bytes (ArkTS has no TextEncoder). */
+  private strToBytes(s: string): Uint8Array {
+    const buf = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) {
+      buf[i] = s.charCodeAt(i) & 0xFF;
+    }
+    return buf;
+  }
+
+  private backToChats(): void {
+    if (this.store !== null) {
+      this.store.put('current_view', 'chats').catch(() => {});
+    }
+    this.animatedSetView('chats');
+  }
+
+  /** Build a provisioning deep-link URL for the current backend. */
+  private buildProvisionUrl(): string {
+    const host = ServerConfig.BACKEND_HOST;
+    const port = ServerConfig.BACKEND_PORT;
+    return ServerConfig.PROVISION_SCHEME + '://' + ServerConfig.PROVISION_HOST + '?host=' + encodeURIComponent(host) + '&port=' + port;
+  }
+
+  /** Toggle the provisioning QR card on the connect screen. */
+  private toggleProvisionQR(): void {
+    this.showProvisionQR = !this.showProvisionQR;
+    if (this.showProvisionQR) {
+      this.provisionUrl = this.buildProvisionUrl();
+    }
+  }
+
+  /** Animate view switches with an elegant spring curve. */
+  private animatedSetView(v: ShellView): void {
+    this.getUIContext().animateTo({
+      duration: 260,
+      curve: curves.springMotion(0.35, 0.85),
+    }, () => {
+      this.view = v;
+    });
+  }
+
+  /** Hand off the current chat to another HarmonyOS device (App Continuation). */
+  private async handOff(): Promise<void> {
+    try {
+      const params: continuationManager.ContinuationExtraParams = {};
+      const token = await continuationManager.register(params);
+      hilog.info(DOMAIN, TAG, 'continuation registered, token=%{public}d', token);
+      await continuationManager.startContinuationDeviceManager(token, params);
+      setTimeout(() => {
+        continuationManager.unregister(token).catch(() => {});
+      }, 10000);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'handOff failed: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  build() {
+    Stack() {
+      // SECURITY BARRIER FAILURE: device not trusted — block all content.
+      if (this.securityBlocked) {
+        Column({ space: 12 }) {
+          Text('Device not trusted')
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#EA4335')
+          Text('This device failed the hardware integrity check. Chats are locked and local credentials have been wiped.')
+            .fontSize(14)
+            .fontColor('#54656F')
+            .textAlign(TextAlign.Center)
+            .padding({ left: 24, right: 24 })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#FFFFFF')
+      } else if (this.view === 'connect') {
+        Column({ space: 16 }) {
+          Blank()
+          Text('Link your WhatsApp')
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#111B21')
+          Text('Open WhatsApp on your phone, tap Linked Devices > Link a Device, and scan this QR code.')
+            .fontSize(14)
+            .fontColor('#54656F')
+            .textAlign(TextAlign.Center)
+            .padding({ left: 24, right: 24 })
+
+          // QR code card.
+          Stack() {
+            if (this.qr.length > 0) {
+              QRCode(this.qr)
+                .width(240)
+                .height(240)
+                .backgroundColor('#FFFFFF')
+                .borderRadius(12)
+            } else {
+              Column({ space: 12 }) {
+                LoadingProgress()
+                  .width(40)
+                  .height(40)
+                  .color('#00A884')
+                Text('Waiting for a QR code…')
+                  .fontSize(13)
+                  .fontColor('#54656F')
+              }
+              .width(240)
+              .height(240)
+              .justifyContent(FlexAlign.Center)
+            }
+          }
+          .width(260)
+          .height(260)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(16)
+          .shadow({ radius: 12, color: '#11000000', offsetY: 4 })
+
+          Text('The code refreshes automatically. No browser or PC needed after linking.')
+            .fontSize(12)
+            .fontColor('#54656F')
+            .textAlign(TextAlign.Center)
+            .padding({ left: 24, right: 24 })
+
+          // ---- Link with phone number instead ----
+          Button(this.showPhoneLink ? 'Hide phone-number link' : 'Link with phone number instead')
+            .width('70%')
+            .height(44)
+            .backgroundColor('#FFFFFF')
+            .fontColor('#00A884')
+            .border({ width: 1, color: '#00A884' })
+            .borderRadius(22)
+            .onClick(() => {
+              this.showPhoneLink = !this.showPhoneLink;
+            })
+
+          if (this.showPhoneLink) {
+            Column({ space: 12 }) {
+              Text('Enter your phone number to get an 8-character code, then tap Link a Device > Link with phone number instead in WhatsApp.')
+                .fontSize(12)
+                .fontColor('#54656F')
+                .textAlign(TextAlign.Center)
+
+              Row({ space: 8 }) {
+                // Country code.
+                TextInput({ text: this.phoneCountry, placeholder: '1' })
+                  .width(72)
+                  .height(46)
+                  .type(InputType.Number)
+                  .fontColor('#000000')
+                  .placeholderColor('#666666')
+                  .onChange((v: string) => {
+                    this.phoneCountry = v.replace(/[^0-9+]/g, '');
+                  })
+                // Phone number.
+                TextInput({ text: this.phoneNumber, placeholder: 'Phone number' })
+                  .layoutWeight(1)
+                  .height(46)
+                  .type(InputType.PhoneNumber)
+                  .fontColor('#000000')
+                  .placeholderColor('#666666')
+                  .onChange((v: string) => {
+                    this.phoneNumber = v;
+                  })
+              }
+
+              Button(this.pairBusy ? 'Requesting…' : 'Get code')
+                .width('100%')
+                .height(44)
+                .backgroundColor('#00A884')
+                .fontColor('#FFFFFF')
+                .enabled(!this.pairBusy)
+                .onClick(() => {
+                  this.startPhonePair();
+                })
+
+              if (this.pairError.length > 0) {
+                Text(this.pairError)
+                  .fontSize(12)
+                  .fontColor('#EA4335')
+                  .textAlign(TextAlign.Center)
+              }
+
+              if (this.pairCodeText.length === 8) {
+                Column({ space: 6 }) {
+                  Text('Enter this 8-character code in WhatsApp (Link with phone number instead):')
+                    .fontSize(11)
+                    .fontColor('#54656F')
+                    .textAlign(TextAlign.Center)
+                  Row({ space: 4 }) {
+                    Text('+' + this.phoneCountry)
+                      .fontSize(11)
+                      .fontColor('#00A884')
+                      .fontWeight(FontWeight.Bold)
+                    ForEach(this.pairCodeText.split(''), (ch: string) => {
+                      Text(ch)
+                        .fontSize(20)
+                        .fontWeight(FontWeight.Bold)
+                        .fontColor('#111B21')
+                        .width(32)
+                        .height(40)
+                        .textAlign(TextAlign.Center)
+                        .backgroundColor('#F0F2F5')
+                        .borderRadius(6)
+                        .border({ width: 1, color: '#DDDDDD' })
+                    }, (ch: string) => ch)
+                  }
+                  .justifyContent(FlexAlign.Center)
+                }
+              }
+            }
+            .width('85%')
+            .padding(16)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .shadow({ radius: 8, color: '#11000000', offsetY: 2 })
+          }
+
+          // ---- Passkey (SHORTCAKE) verification card ----
+          if (this.passkeyPending || this.passkeyCode.length > 0) {
+            Column({ space: 12 }) {
+              Text('WhatsApp security check')
+                .fontSize(14)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#111B21')
+              Text('WhatsApp wants to verify this device with a passkey. Complete the check to finish linking.')
+                .fontSize(12)
+                .fontColor('#54656F')
+                .textAlign(TextAlign.Center)
+
+              if (this.passkeyCode.length > 0) {
+                Text('Verification code — enter it in WhatsApp if asked:')
+                  .fontSize(12)
+                  .fontColor('#54656F')
+                  .textAlign(TextAlign.Center)
+                 Text(this.passkeyCode)
+                   .fontSize(24)
+                   .fontWeight(FontWeight.Bold)
+                   .fontColor('#111B21')
+                   .letterSpacing(4)
+                   .textAlign(TextAlign.Center)
+                Button(this.passkeyBusy ? 'Confirming…' : 'I entered the code — Confirm')
+                  .width('100%')
+                  .height(42)
+                  .backgroundColor('#00A884')
+                  .fontColor('#FFFFFF')
+                  .enabled(!this.passkeyBusy)
+                  .onClick(() => {
+                    this.confirmPasskey();
+                  })
+              } else if (this.passkeyPending) {
+                Text('No native WebAuthn API on this SDK yet — paste the assertion JSON from a real authenticator to continue.')
+                  .fontSize(11)
+                  .fontColor('#54656F')
+                  .textAlign(TextAlign.Center)
+                TextInput({ text: this.assertionInput, placeholder: 'Paste WebAuthn assertion JSON' })
+                  .width('100%')
+                  .height(90)
+                  .type(InputType.Normal)
+                  .onChange((v: string) => {
+                    this.assertionInput = v;
+                  })
+                Button(this.passkeyBusy ? 'Submitting…' : 'Submit assertion')
+                  .width('100%')
+                  .height(42)
+                  .backgroundColor('#00A884')
+                  .fontColor('#FFFFFF')
+                  .enabled(!this.passkeyBusy && this.assertionInput.length > 0)
+                  .onClick(() => {
+                    this.submitPasskeyAssertion();
+                  })
+                Button('Use the QR code instead')
+                  .width('100%')
+                  .height(38)
+                  .backgroundColor('#FFFFFF')
+                  .fontColor('#54656F')
+                  .border({ width: 1, color: '#DDDDDD' })
+                  .borderRadius(19)
+                  .onClick(() => {
+                    this.cancelPasskey();
+                  })
+              }
+
+              if (this.passkeyError.length > 0) {
+                Text(this.passkeyError)
+                  .fontSize(12)
+                  .fontColor('#EA4335')
+                  .textAlign(TextAlign.Center)
+                Button('Retry security check')
+                  .width('100%')
+                  .height(36)
+                  .backgroundColor('#FFFFFF')
+                  .fontColor('#00A884')
+                  .border({ width: 1, color: '#00A884' })
+                  .borderRadius(18)
+                  .onClick(() => {
+                    this.refreshPasskey();
+                  })
+              }
+            }
+            .width('85%')
+            .padding(16)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .shadow({ radius: 8, color: '#11000000', offsetY: 2 })
+          }
+
+          // ---- Provisioning QR (for air-gapped / per-customer deployments) ----
+          Button(this.showProvisionQR ? 'Hide provisioning QR' : 'Provision another device')
+            .width('70%')
+            .height(44)
+            .backgroundColor('#FFFFFF')
+            .fontColor('#00A884')
+            .border({ width: 1, color: '#00A884' })
+            .borderRadius(22)
+            .onClick(() => {
+              this.toggleProvisionQR();
+            })
+
+          if (this.showProvisionQR) {
+            Column({ space: 12 }) {
+              Text('Scan this QR with another WhatIsIt device to auto-configure the backend.')
+                .fontSize(12)
+                .fontColor('#54656F')
+                .textAlign(TextAlign.Center)
+              Stack() {
+                if (this.provisionUrl.length > 0) {
+                  QRCode(this.provisionUrl)
+                    .width(200)
+                    .height(200)
+                    .backgroundColor('#FFFFFF')
+                    .borderRadius(8)
+                }
+              }
+              .width(220)
+              .height(220)
+              .backgroundColor('#FFFFFF')
+              .borderRadius(12)
+              .border({ width: 1, color: '#DDDDDD' })
+              Text('URL: ' + this.provisionUrl)
+                .fontSize(10)
+                .fontColor('#888888')
+                .textAlign(TextAlign.Center)
+                .padding({ left: 12, right: 12 })
+            }
+            .width('85%')
+            .padding(16)
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .shadow({ radius: 8, color: '#11000000', offsetY: 2 })
+          }
+
+          Button(this.connecting ? 'Connecting…' : 'Refresh QR')
+            .width('70%')
+            .height(48)
+            .backgroundColor('#00A884')
+            .fontColor('#FFFFFF')
+            .enabled(!this.connecting)
+            .onClick(() => {
+              this.connect();
+            })
+          if (this.errorMsg.length > 0) {
+            Text(this.errorMsg)
+              .fontSize(13)
+              .fontColor('#EA4335')
+              .textAlign(TextAlign.Center)
+              .padding({ left: 24, right: 24 })
+          }
+          Blank()
+        }
+        .width('100%')
+        .height('100%')
+        .padding(24)
+        .backgroundColor('#F0F2F5')
+        .transition(TransitionEffect.OPACITY)
+      } else if (this.view === 'chats') {
+        ChatListView({ onOpenChat: (name: string) => {
+          this.openThread(name);
+        }, onLoggedOut: () => {
+          this.view = 'connect';
+          this.stopQrPoll();
+        }, onHandOff: () => {
+          this.handOff();
+        } })
+          .width('100%')
+          .height('100%')
+          .transition(TransitionEffect.OPACITY)
+      } else if (this.view === 'thread') {
+        ChatThreadView({ chatName: this.chatName, onBack: () => {
+          this.backToChats();
+        } })
+          .width('100%')
+          .height('100%')
+          .transition(TransitionEffect.OPACITY)
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F0F2F5')
+  }
+}
