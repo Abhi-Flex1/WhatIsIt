@@ -2,9 +2,8 @@ import { cdpBridge, MessageEntry, MediaMessage } from '../services/CdpBridge';
 import { remoteFeatures } from '../services/RemoteFeatures';
 import { mediaSender, MediaSendMode } from '../services/MediaSender';
 import { mediaDownloader } from '../services/MediaDownloader';
-import { e2ee, CipherRow } from '../services/E2eeService';
+import { e2ee } from '../services/E2eeService';
 import { callService } from '../services/CallService';
-import { localNotifications } from '../services/LocalNotifications';
 import { CallSurfaceView } from './CallSurfaceView';
 import { Theme } from '../styles/Theme';
 import { AppLifecycle } from '../services/AppLifecycle';
@@ -16,10 +15,63 @@ import { curves, dragController } from '@kit.ArkUI';
 
 const TAG = 'ChatThreadView';
 const DOMAIN = 0x0000;
-const WHATSAPP_GREEN = '#00A884';
-const BG = '#F0F2F5';
-const TEXT_PRIMARY = '#111B21';
-const TEXT_SECONDARY = '#54656F';
+
+/** Discriminated entries fed to the lazy message list (date chip, text, media). */
+interface MsgEntry {
+  kind: 'msg';
+  msg: MessageEntry;
+  key: string;
+  groupStart: boolean;
+  groupEnd: boolean;
+}
+interface MediaEntry {
+  kind: 'media';
+  media: MediaMessage;
+  key: string;
+  groupStart: boolean;
+  groupEnd: boolean;
+}
+interface DateEntry {
+  kind: 'date';
+  label: string;
+  key: string;
+}
+type ThreadEntry = MsgEntry | MediaEntry | DateEntry;
+
+const MONTHS: string[] = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+class ThreadDataSource implements IDataSource {
+  private listeners: DataChangeListener[] = [];
+  private items: ThreadEntry[] = [];
+
+  totalCount(): number {
+    return this.items.length;
+  }
+
+  getData(index: number): Object {
+    return this.items[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (!this.listeners.includes(listener)) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const i = this.listeners.indexOf(listener);
+    if (i >= 0) {
+      this.listeners.splice(i, 1);
+    }
+  }
+
+  setData(items: ThreadEntry[]): void {
+    this.items = items;
+    this.listeners.forEach((l: DataChangeListener) => {
+      l.onDataReloaded();
+    });
+  }
+}
 
 @Component
 export struct ChatThreadView {
@@ -38,8 +90,12 @@ export struct ChatThreadView {
   @State callIsVideo: boolean = false;
   @State replyTargetId: string = '';
   @State replyDraft: string = '';
+  @State avatarFailed: boolean = false;
   private timer: number | null = null;
   private avPlayer: media.AVPlayer | null = null;
+  private scroller: Scroller = new Scroller();
+  private dataSource: ThreadDataSource = new ThreadDataSource();
+  private lastCount: number = 0;
 
   aboutToAppear(): void {
     cdpBridge.openChat(this.chatName);
@@ -97,6 +153,7 @@ export struct ChatThreadView {
       }
     }
     this.loading = false;
+    this.pushEntries();
   }
 
   /** Encrypt newly-scraped messages and persist them (dedupe by id). */
@@ -143,6 +200,84 @@ export struct ChatThreadView {
         return true;
       });
     }
+  }
+
+  /** Chronological sort key for scraped time labels ("HH:MM" or "Mmm d"). */
+  private timeSortKey(t: string): number {
+    const hm = /^(\d{1,2}):(\d{2})$/.exec(t);
+    if (hm !== null) {
+      // Same-day entries sort after any dated (older) entries.
+      return 2000000 + parseInt(hm[1], 10) * 60 + parseInt(hm[2], 10);
+    }
+    const dm = /^([A-Za-z]{3})\s+(\d{1,2})$/.exec(t);
+    if (dm !== null) {
+      const mon = MONTHS.indexOf(dm[1]);
+      return (mon >= 0 ? mon : 99) * 100 + parseInt(dm[2], 10);
+    }
+    return 0;
+  }
+
+  /** Day label for a time string: "Today" for HH:MM, the date itself otherwise. */
+  private dayLabel(t: string): string {
+    return /^[A-Za-z]{3}\s+\d{1,2}$/.test(t) ? t : 'Today';
+  }
+
+  /**
+   * Merge messages + media chronologically, insert a date chip whenever the
+   * day changes, and mark consecutive same-sender runs so bubbles can be
+   * grouped (tight spacing + tail only on the last of a run).
+   */
+  private buildEntries(): ThreadEntry[] {
+    interface Raw {
+      kind: string;
+      msg?: MessageEntry;
+      media?: MediaMessage;
+      dir: string;
+      time: string;
+      key: string;
+    }
+    const items: Raw[] = [];
+    for (const m of this.messages) {
+      items.push({ kind: 'msg', msg: m, dir: m.dir, time: m.time, key: 'msg-' + m.id });
+    }
+    for (const m of this.mediaMessages) {
+      items.push({ kind: 'media', media: m, dir: m.dir, time: m.time, key: 'media-' + m.id });
+    }
+    items.sort((a: Raw, b: Raw) => this.timeSortKey(a.time) - this.timeSortKey(b.time));
+
+    const out: ThreadEntry[] = [];
+    let prevDay = '';
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const day = this.dayLabel(it.time);
+      if (day !== prevDay) {
+        out.push({ kind: 'date', label: day, key: 'date-' + day + '-' + i });
+        prevDay = day;
+      }
+      const prev = i > 0 ? items[i - 1] : null;
+      const next = i < items.length - 1 ? items[i + 1] : null;
+      const groupStart = prev === null || prev.dir !== it.dir || prev.kind !== it.kind;
+      const groupEnd = next === null || next.dir !== it.dir || next.kind !== it.kind;
+      if (it.kind === 'msg' && it.msg !== undefined) {
+        out.push({ kind: 'msg', msg: it.msg, key: it.key, groupStart: groupStart, groupEnd: groupEnd });
+      } else if (it.kind === 'media' && it.media !== undefined) {
+        out.push({ kind: 'media', media: it.media, key: it.key, groupStart: groupStart, groupEnd: groupEnd });
+      }
+    }
+    return out;
+  }
+
+  /** Push the merged list into the lazy data source; auto-scroll on new items. */
+  private pushEntries(): void {
+    const entries: ThreadEntry[] = this.buildEntries();
+    this.dataSource.setData(entries);
+    // Jump to the newest message when new content arrived (or first paint).
+    if (entries.length > this.lastCount) {
+      setTimeout(() => {
+        this.scroller.scrollEdge(Edge.Bottom);
+      }, 0);
+    }
+    this.lastCount = entries.length;
   }
 
   private async send(): Promise<void> {
@@ -332,36 +467,50 @@ export struct ChatThreadView {
     Column() {
       Text(content)
         .fontSize(13)
-        .fontColor(Theme.INK)
+        .fontColor($r('app.color.ink'))
         .maxLines(3)
     }
     .width(200)
     .padding(12)
-    .backgroundColor(Theme.SURFACE)
+    .backgroundColor($r('app.color.surface'))
     .borderRadius(Theme.RADIUS_CARD)
     .shadow({ radius: 12, color: '#33000000', offsetY: 4 })
   }
 
   @Builder
-  Bubble(msg: MessageEntry) {
+  DateChip(label: string) {
+    Row() {
+      Text(label)
+        .fontSize(12)
+        .fontColor($r('app.color.ink_subtle'))
+    }
+    .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+    .backgroundColor($r('app.color.surface_subtle'))
+    .borderRadius(Theme.RADIUS_CHIP)
+    .alignSelf(ItemAlign.Center)
+    .margin({ top: 10, bottom: 6 })
+  }
+
+  @Builder
+  Bubble(msg: MessageEntry, groupStart: boolean, groupEnd: boolean) {
     Column({ space: 4 }) {
       if (msg.replyTo.length > 0) {
         Text(msg.replyTo)
           .fontSize(12)
-          .fontColor(TEXT_SECONDARY)
+          .fontColor($r('app.color.ink_subtle'))
           .maxLines(2)
-          .backgroundColor(Theme.SURFACE_SUBTLE)
+          .backgroundColor($r('app.color.surface_subtle'))
           .borderRadius(6)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
       }
       Text(msg.text)
         .fontSize(15)
-        .fontColor(TEXT_PRIMARY)
+        .fontColor(msg.dir === 'out' ? $r('app.color.bubble_out_text') : $r('app.color.bubble_in_text'))
         .lineHeight(20)
       if (msg.reactions.length > 0) {
         Text(msg.reactions)
           .fontSize(13)
-          .backgroundColor(Theme.SURFACE_SUBTLE)
+          .backgroundColor($r('app.color.surface_subtle'))
           .borderRadius(Theme.RADIUS_CHIP)
           .padding({ left: 8, right: 8, top: 2, bottom: 2 })
           .alignSelf(ItemAlign.End)
@@ -369,7 +518,7 @@ export struct ChatThreadView {
       Row({ space: 4 }) {
         Text(msg.time)
           .fontSize(11)
-          .fontColor(TEXT_SECONDARY)
+          .fontColor($r('app.color.ink_subtle'))
         if (msg.dir === 'out') {
           if (msg.status === 'read') {
             SymbolGlyph($r('sys.symbol.checkmark'))
@@ -395,10 +544,17 @@ export struct ChatThreadView {
       .alignSelf(ItemAlign.End)
     }
     .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-    .backgroundColor(msg.dir === 'out' ? '#D9FDD3' : '#FFFFFF')
-    .borderRadius(12)
+    .backgroundColor(msg.dir === 'out' ? $r('app.color.bubble_out') : $r('app.color.bubble_in'))
+    // Tails: asymmetric corner on the last bubble of a sender run.
+    .borderRadius(msg.dir === 'out'
+      ? { topLeft: Theme.RADIUS_BUBBLE, topRight: groupEnd ? 4 : Theme.RADIUS_BUBBLE, bottomLeft: Theme.RADIUS_BUBBLE, bottomRight: Theme.RADIUS_BUBBLE }
+      : { topLeft: groupEnd ? 4 : Theme.RADIUS_BUBBLE, topRight: Theme.RADIUS_BUBBLE, bottomLeft: Theme.RADIUS_BUBBLE, bottomRight: Theme.RADIUS_BUBBLE })
     .alignSelf(msg.dir === 'out' ? ItemAlign.End : ItemAlign.Start)
-    .margin({ left: msg.dir === 'out' ? 40 : 8, right: msg.dir === 'out' ? 8 : 40, top: 4, bottom: 4 })
+    // Same-sender runs are tight (1px), groups breathe (10px before, 8px after).
+    .margin({
+      top: groupStart ? 10 : 1,
+      bottom: groupEnd ? 8 : 1
+    })
     .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.97, y: 0.97 })))
     .gesture(
       LongPressGesture({ repeat: false })
@@ -417,7 +573,7 @@ export struct ChatThreadView {
 
   /** Native media bubble — downloads the scraped URL and renders an Image/Video. */
   @Builder
-  MediaBubble(m: MediaMessage) {
+  MediaBubble(m: MediaMessage, groupStart: boolean, groupEnd: boolean) {
     Column({ space: 4 }) {
       if (m.type === 'video') {
         this.VideoContent(m)
@@ -428,14 +584,19 @@ export struct ChatThreadView {
       }
       Text(m.time)
         .fontSize(11)
-        .fontColor(TEXT_SECONDARY)
+        .fontColor($r('app.color.ink_subtle'))
         .alignSelf(ItemAlign.End)
     }
     .padding(4)
-    .backgroundColor(m.dir === 'out' ? '#D9FDD3' : '#FFFFFF')
-    .borderRadius(12)
+    .backgroundColor(m.dir === 'out' ? $r('app.color.bubble_out') : $r('app.color.bubble_in'))
+    .borderRadius(m.dir === 'out'
+      ? { topLeft: Theme.RADIUS_BUBBLE, topRight: groupEnd ? 4 : Theme.RADIUS_BUBBLE, bottomLeft: Theme.RADIUS_BUBBLE, bottomRight: Theme.RADIUS_BUBBLE }
+      : { topLeft: groupEnd ? 4 : Theme.RADIUS_BUBBLE, topRight: Theme.RADIUS_BUBBLE, bottomLeft: Theme.RADIUS_BUBBLE, bottomRight: Theme.RADIUS_BUBBLE })
     .alignSelf(m.dir === 'out' ? ItemAlign.End : ItemAlign.Start)
-    .margin({ left: m.dir === 'out' ? 40 : 8, right: m.dir === 'out' ? 8 : 40, top: 4, bottom: 4 })
+    .margin({
+      top: groupStart ? 10 : 1,
+      bottom: groupEnd ? 8 : 1
+    })
     .gesture(
       PanGesture({ fingers: 1, distance: 8 })
         .onActionStart((event: GestureEvent) => {
@@ -453,17 +614,17 @@ export struct ChatThreadView {
       if (this.mediaPaths.has(m.id)) {
         Text('Play voice note')
           .fontSize(14)
-          .fontColor(TEXT_PRIMARY)
+          .fontColor($r('app.color.ink'))
       } else {
         Text('Loading…')
           .fontSize(14)
-          .fontColor(TEXT_SECONDARY)
+          .fontColor($r('app.color.ink_subtle'))
       }
     }
     .width(180)
     .height(48)
     .padding({ left: 12, right: 12 })
-    .backgroundColor(Theme.SURFACE_SUBTLE)
+    .backgroundColor($r('app.color.surface_subtle'))
     .borderRadius(Theme.RADIUS_CHIP)
     .onClick(() => {
       this.playAudio(m);
@@ -482,12 +643,12 @@ export struct ChatThreadView {
       Column() {
         SymbolGlyph($r('sys.symbol.rectangle_stack'))
           .fontSize(28)
-          .fontColor([Theme.INK_FADED])
+          .fontColor([$r('app.color.ink_faded')])
       }
       .width(180)
       .height(180)
       .justifyContent(FlexAlign.Center)
-      .backgroundColor('#E4E6EB')
+      .backgroundColor($r('app.color.media_placeholder'))
       .borderRadius(8)
     }
   }
@@ -504,91 +665,147 @@ export struct ChatThreadView {
       Column() {
         SymbolGlyph($r('sys.symbol.play'))
           .fontSize(28)
-          .fontColor([Theme.INK_FADED])
+          .fontColor([$r('app.color.ink_faded')])
       }
       .width(180)
       .height(180)
       .justifyContent(FlexAlign.Center)
-      .backgroundColor('#E4E6EB')
+      .backgroundColor($r('app.color.media_placeholder'))
       .borderRadius(8)
     }
   }
 
   build() {
     Column() {
+      // iOS-style navigation bar.
       Row() {
         SymbolGlyph($r('sys.symbol.chevron_left'))
           .fontSize(22)
-          .fontColor(['#FFFFFF'])
+          .fontColor([$r('app.color.ink')])
+          .width(36)
           .onClick(() => {
             this.onBack();
           })
-        Text(this.chatName)
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#FFFFFF')
-          .layoutWeight(1)
-          .margin({ left: 8 })
+
+        Stack() {
+          Circle({ width: 34, height: 34 })
+            .fill($r('app.color.brand'))
+          if (this.chatName.length > 0) {
+            Text(this.chatName.charAt(0).toUpperCase())
+              .fontSize(14)
+              .fontColor($r('app.color.brand_text'))
+          }
+          if (!this.avatarFailed && this.chatName.length > 0) {
+            Image(cdpBridge.avatarUrlFor(this.chatName))
+              .width(34)
+              .height(34)
+              .borderRadius(17)
+              .onError(() => {
+                this.avatarFailed = true;
+              })
+          }
+        }
+        .width(34)
+        .height(34)
+        .margin({ right: 10 })
+
+        Column({ space: 2 }) {
+          if (this.chatName.length > 0) {
+            Text(cdpBridge.displayName(this.chatName))
+              .fontSize(17)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.ink'))
+              .maxLines(1)
+          }
+          Text('WhatsApp')
+            .fontSize(11)
+            .fontColor($r('app.color.ink_faded'))
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Center)
+
         SymbolGlyph($r('sys.symbol.phone'))
           .fontSize(20)
-          .fontColor(['#FFFFFF'])
+          .fontColor([$r('app.color.ink')])
           .margin({ left: 8 })
           .onClick(() => {
             this.startWhatsAppCall(false);
           })
         SymbolGlyph($r('sys.symbol.video'))
           .fontSize(20)
-          .fontColor(['#FFFFFF'])
-          .margin({ left: 12 })
+          .fontColor([$r('app.color.ink')])
+          .margin({ left: 16, right: 8 })
           .onClick(() => {
             this.startWhatsAppCall(true);
           })
       }
       .width('100%')
-      .padding({ left: 12, right: 12, top: 12, bottom: 12 })
-      .backgroundColor(WHATSAPP_GREEN)
+      .height(Theme.HEADER_HEIGHT)
+      .padding({ left: 4, right: 8 })
+      .backgroundColor($r('app.color.surface'))
+      .border({ width: { bottom: 0.5 }, color: $r('app.color.divider') })
 
       if (this.loading) {
         Column() {
           LoadingProgress()
             .width(48)
             .height(48)
-            .color(WHATSAPP_GREEN)
+            .color($r('app.color.brand'))
         }
         .width('100%')
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
-      } else if (this.messages.length === 0) {
+        .backgroundColor($r('app.color.bg_chat'))
+      } else if (this.dataSource.totalCount() === 0) {
         Column({ space: 8 }) {
           Text('No messages')
             .fontSize(16)
             .fontWeight(FontWeight.Medium)
-            .fontColor(TEXT_PRIMARY)
+            .fontColor($r('app.color.ink'))
           Text('Messages will appear when the session is active.')
             .fontSize(13)
-            .fontColor(TEXT_SECONDARY)
+            .fontColor($r('app.color.ink_subtle'))
             .textAlign(TextAlign.Center)
             .padding({ left: 24, right: 24 })
         }
         .width('100%')
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
+        .backgroundColor($r('app.color.bg_chat'))
       } else {
-        List({ space: 2 }) {
-          ForEach(this.messages, (msg: MessageEntry) => {
+        List({ space: 0, scroller: this.scroller }) {
+          LazyForEach(this.dataSource, (entry: Object) => {
             ListItem() {
-              this.Bubble(msg)
+              if ((entry as ThreadEntry).kind === 'date') {
+                Row() {
+                  this.DateChip((entry as DateEntry).label)
+                }
+                .width('100%')
+                .justifyContent(FlexAlign.Center)
+              } else if ((entry as ThreadEntry).kind === 'media') {
+                Row() {
+                  this.MediaBubble((entry as MediaEntry).media,
+                    (entry as MediaEntry).groupStart, (entry as MediaEntry).groupEnd)
+                }
+                .width('100%')
+                .padding({ left: 12, right: 12 })
+                .justifyContent((entry as MediaEntry).media.dir === 'out' ? FlexAlign.End : FlexAlign.Start)
+              } else {
+                Row() {
+                  this.Bubble((entry as MsgEntry).msg,
+                    (entry as MsgEntry).groupStart, (entry as MsgEntry).groupEnd)
+                }
+                .width('100%')
+                .padding({ left: 12, right: 12 })
+                .justifyContent((entry as MsgEntry).msg.dir === 'out' ? FlexAlign.End : FlexAlign.Start)
+              }
             }
-          }, (msg: MessageEntry) => msg.id)
-          ForEach(this.mediaMessages, (m: MediaMessage) => {
-            ListItem() {
-              this.MediaBubble(m)
-            }
-          }, (m: MediaMessage) => m.id)
+          }, (entry: Object) => (entry as ThreadEntry).key)
         }
         .width('100%')
         .layoutWeight(1)
-        .padding({ top: 8, bottom: 8 })
+        .backgroundColor($r('app.color.bg_chat'))
+        .animation({ duration: Theme.DURATION_FAST, curve: curves.springMotion(0.35, 0.85) })
       }
 
       // Reply indicator (set by long-pressing a message).
@@ -596,53 +813,57 @@ export struct ChatThreadView {
         Row({ space: 8 }) {
           Text('Replying to: ' + this.replyDraft)
             .fontSize(12)
-            .fontColor(TEXT_SECONDARY)
+            .fontColor($r('app.color.ink_subtle'))
             .maxLines(1)
             .layoutWeight(1)
           SymbolGlyph($r('sys.symbol.xmark'))
             .fontSize(14)
-            .fontColor([TEXT_SECONDARY])
+            .fontColor([$r('app.color.ink_subtle')])
             .onClick(() => {
               this.replyTargetId = '';
               this.replyDraft = '';
             })
         }
         .width('100%')
-        .padding({ left: 12, right: 12, top: 4, bottom: 4 })
-        .backgroundColor(Theme.SURFACE_SUBTLE)
+        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+        .backgroundColor($r('app.color.surface_subtle'))
       }
 
       Row({ space: 8 }) {
         Button() {
-          SymbolGlyph($r('sys.symbol.camera'))
+          SymbolGlyph($r('sys.symbol.paperclip'))
             .fontSize(18)
-            .fontColor([TEXT_PRIMARY])
+            .fontColor([$r('app.color.ink_subtle')])
         }
-        .width(44)
-        .height(44)
-        .backgroundColor('#FFFFFF')
-        .enabled(!this.sendingMedia)
-        .onClick(() => {
-          this.sendMedia('camera');
-        })
-        Button() {
-          SymbolGlyph($r('sys.symbol.rectangle_stack'))
-            .fontSize(18)
-            .fontColor([TEXT_PRIMARY])
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor('#FFFFFF')
+        .width(40)
+        .height(40)
+        .backgroundColor($r('app.color.surface_subtle'))
+        .borderRadius(20)
         .enabled(!this.sendingMedia)
         .onClick(() => {
           this.sendMedia('gallery');
         })
+        Button() {
+          SymbolGlyph($r('sys.symbol.camera'))
+            .fontSize(18)
+            .fontColor([$r('app.color.ink_subtle')])
+        }
+        .width(40)
+        .height(40)
+        .backgroundColor($r('app.color.surface_subtle'))
+        .borderRadius(20)
+        .enabled(!this.sendingMedia)
+        .onClick(() => {
+          this.sendMedia('camera');
+        })
         TextInput({ placeholder: 'Message', text: this.draft })
           .layoutWeight(1)
-          .height(44)
+          .height(40)
           .fontSize(15)
-          .backgroundColor('#FFFFFF')
-          .borderRadius(22)
+          .fontColor($r('app.color.ink'))
+          .placeholderColor($r('app.color.ink_faded'))
+          .backgroundColor($r('app.color.surface_subtle'))
+          .borderRadius(Theme.RADIUS_FIELD)
           .onChange((v: string) => {
             this.draft = v;
           })
@@ -652,19 +873,26 @@ export struct ChatThreadView {
         Button() {
           SymbolGlyph($r('sys.symbol.arrow_up'))
             .fontSize(18)
-            .fontColor(['#FFFFFF'])
+            .fontColor([$r('app.color.brand_text')])
         }
-        .width(44)
-        .height(44)
-        .backgroundColor(WHATSAPP_GREEN)
+        .width(40)
+        .height(40)
+        .backgroundColor($r('app.color.brand'))
+        .borderRadius(20)
         .enabled(!this.sendingMedia)
+        .stateStyles({
+          pressed: {
+            .backgroundColor($r('app.color.brand_pressed'))
+          }
+        })
         .onClick(() => {
           this.send();
         })
       }
       .width('100%')
       .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-      .backgroundColor(BG)
+      .backgroundColor($r('app.color.surface'))
+      .border({ width: { top: 0.5 }, color: $r('app.color.divider') })
 
       // In-shell native WhatsApp call surface (overlay on the thread).
       if (this.callRoomUrl.length > 0) {
@@ -682,6 +910,6 @@ export struct ChatThreadView {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(BG)
+    .backgroundColor($r('app.color.bg_chat'))
   }
 }

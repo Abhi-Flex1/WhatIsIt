@@ -176,6 +176,9 @@ func (wc *WAClient) handleEvent(evt any) {
 			wc.state.Store.SetPhone(phone)
 			wc.state.Bus.Publish(EvLinked(phone))
 		}
+		// Announce the session as available so the phone's Linked devices
+		// view shows it as "Active now" instead of the last link timestamp.
+		wc.sendPresence()
 	case *events.LoggedOut:
 		wc.onLoggedOut()
 	case *events.PairPasskeyRequest:
@@ -186,6 +189,8 @@ func (wc *WAClient) handleEvent(evt any) {
 		wc.state.Bus.Publish(EvPasskeyErr(e.Error.Error()))
 	case *events.Message:
 		wc.onMessage(e)
+	case *events.HistorySync:
+		wc.onHistorySync(e)
 	case *events.Receipt:
 		wc.onReceipt(e)
 	case *events.ChatPresence:
@@ -198,6 +203,17 @@ func (wc *WAClient) onLinked(e *events.PairSuccess) {
 	wc.state.SetPhone(phone)
 	wc.state.Store.SetPhone(phone)
 	wc.state.Bus.Publish(EvLinked(phone))
+}
+
+// sendPresence announces the session as available so the phone's Linked
+// devices view shows it as "Active now" instead of the last link timestamp.
+func (wc *WAClient) sendPresence() {
+	if wc.cli.Store.ID == nil || !wc.cli.IsConnected() {
+		return
+	}
+	if err := wc.cli.SendPresence(wc.cli.BackgroundEventCtx, types.PresenceAvailable); err != nil {
+		log.Printf("send presence: %v", err)
+	}
 }
 
 func (wc *WAClient) onLoggedOut() {

@@ -132,6 +132,7 @@ func (r *CallRegistry) StartOutgoing(ctx context.Context, wa *WAClient, chat str
 	r.mu.Lock()
 	r.relays[call.ID()] = relay
 	r.mu.Unlock()
+	r.record(call.ID(), call.Peer().String(), "out", video, false)
 	r.state.Bus.Publish(EvCallState(call.ID(), "calling"))
 	return call.ID(), nil
 }
@@ -154,6 +155,9 @@ func (r *CallRegistry) AcceptIncoming(ctx context.Context, wa *WAClient, callID 
 	r.mu.Lock()
 	r.relays[call.ID()] = relay
 	r.mu.Unlock()
+	if r.state != nil && r.state.Store != nil {
+		r.state.Store.MarkCallAnswered(call.ID())
+	}
 	r.state.Bus.Publish(EvCallState(call.ID(), "connecting"))
 	return call.ID(), nil
 }
@@ -209,9 +213,28 @@ func (r *CallRegistry) OnIncomingCall(call *meowcaller.Call) {
 	r.mu.Lock()
 	r.incoming[call.ID()] = &pendingIncoming{call: call}
 	r.mu.Unlock()
-	// Notify the app (incoming_call event).
 	peer := call.Peer().String()
+	r.record(call.ID(), peer, "in", call.IsVideo(), true)
+	// Notify the app (incoming_call event).
 	r.state.Bus.Publish(EvIncomingCall(call.ID(), peer, call.IsVideo()))
+}
+
+// record appends a call-history entry (best-effort, no-op if state is unset).
+func (r *CallRegistry) record(id, peer, dir string, video, missed bool) {
+	r.mu.Lock()
+	state := r.state
+	r.mu.Unlock()
+	if state == nil || state.Store == nil {
+		return
+	}
+	state.Store.AddCall(CallRecord{
+		ID:     id,
+		Peer:   peer,
+		Dir:    dir,
+		Video:  video,
+		Missed: missed,
+		Time:   nowMillis(),
+	})
 }
 
 // ---- media bridge ----

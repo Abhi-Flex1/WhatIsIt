@@ -30,6 +30,32 @@ export class ChatSummary {
   unread: number = 0;
   pinned: boolean = false;
   avatarUrl: string = '';
+  isChannel: boolean = false;
+  description: string = '';
+  subscriberCount: number = 0;
+}
+
+/** A followed WhatsApp channel (newsletter) for the Status / directory views. */
+export class ChannelSummary {
+  id: string = '';
+  name: string = '';
+  description: string = '';
+  subscribers: number = 0;
+  updates: number = 0;
+  invite: string = '';
+  pic: boolean = false;
+  avatarUrl: string = '';
+}
+
+/** One entry in the WhatsApp call history (audio/video, in/out). */
+export class CallRecord {
+  id: string = '';
+  peer: string = '';
+  dir: string = 'out'; // 'in' | 'out'
+  video: boolean = false;
+  missed: boolean = false;
+  time: string = '';
+  name: string = '';
 }
 
 export class MessageEntry {
@@ -90,6 +116,7 @@ export class CdpBridge {
   private wsConnected: boolean = false;
   private listeners: EventListener[] = [];
   private lastChats: ChatSummary[] = [];
+  private channelsCache: ChannelSummary[] = [];
   private currentChatId: string = '';
   private uiContext: common.UIAbilityContext | null = null;
 
@@ -599,10 +626,54 @@ export class CdpBridge {
 
   // ---- chats / messages ----
 
+  /** Fill chat-list rows with avatar URLs + channel metadata. */
+  private decorateChat(c: ChatSummary): ChatSummary {
+    c.isChannel = c.id.indexOf('@newsletter') >= 0;
+    if (c.isChannel) {
+      for (const ch of this.channelsCache) {
+        if (ch.id === c.id) {
+          if (c.name.length === 0) {
+            c.name = ch.name;
+          }
+          c.description = ch.description;
+          c.subscriberCount = ch.subscribers;
+          break;
+        }
+      }
+    }
+    c.avatarUrl = this.avatarUrlFor(c.id);
+    return c;
+  }
+
+  /** The /avatar endpoint URL for a chat JID (404 when it has no picture). */
+  avatarUrlFor(chatId: string): string {
+    if (chatId.length === 0) {
+      return '';
+    }
+    return this.getBaseUrl() + '/avatar?chat=' + encodeURIComponent(chatId);
+  }
+
+  /** Resolve a chat's display name from the chat list / channel cache. */
+  displayName(chatId: string): string {
+    for (const c of this.lastChats) {
+      if (c.id === chatId && c.name.length > 0) {
+        return c.name;
+      }
+    }
+    for (const ch of this.channelsCache) {
+      if (ch.id === chatId && ch.name.length > 0) {
+        return ch.name;
+      }
+    }
+    return chatId;
+  }
+
   /** Fetch the chat list (returns ChatSummary[], id = JID). */
   async scrapeChats(): Promise<ChatSummary[]> {
-    // Embedded engine: parse the engine's JSON directly (no HTTP).
-    const engRaw = waEngine.chats();
+    // Embedded engine: parse the engine's JSON directly (no HTTP). Only
+    // trust it when it is actually loaded and started; otherwise fall
+    // through to the backend HTTP API.
+    const engRaw = waEngine.isReady() ? waEngine.chats() : '';
     if (engRaw.length > 0) {
       const out: ChatSummary[] = [];
       try {
@@ -624,6 +695,9 @@ export class CdpBridge {
         // fall through to HTTP
       }
       if (out.length > 0 || engRaw === '[]') {
+        for (const c of out) {
+          this.decorateChat(c);
+        }
         this.lastChats = out;
         return out;
       }
@@ -650,6 +724,9 @@ export class CdpBridge {
       c.pinned = typeof d['pinned'] === 'boolean' ? (d['pinned'] as boolean) : false;
       c.avatarUrl = '';
       out.push(c);
+    }
+    for (const c of out) {
+      this.decorateChat(c);
     }
     this.lastChats = out;
     return out;
@@ -678,8 +755,9 @@ export class CdpBridge {
     if (jid.length === 0) {
       return [];
     }
-    // Embedded engine: read directly via NAPI.
-    const engRaw = waEngine.messages(jid, 200);
+    // Embedded engine: read directly via NAPI. Only trust it when the
+    // engine is actually loaded and started.
+    const engRaw = waEngine.isReady() ? waEngine.messages(jid, 200) : '';
     if (engRaw.length > 0) {
       const out: MessageEntry[] = [];
       try {
@@ -1106,20 +1184,118 @@ export class CdpBridge {
     return [];
   }
 
-  async scrapeChannels(): Promise<ChatSummary[]> {
-    return [];
+  /** Fetch the followed channels list from the backend (with cache). */
+  async scrapeChannels(): Promise<ChannelSummary[]> {
+    if (this.channelsCache.length > 0) {
+      return this.channelsCache;
+    }
+    const resp = await this.httpJson('GET', '/channels');
+    const out: ChannelSummary[] = [];
+    if (resp !== null) {
+      const arr = resp['channels'];
+      if (arr !== undefined && arr !== null) {
+        const items = arr as object[];
+        for (const item of items) {
+          const d = item as Record<string, Object>;
+          const ch = new ChannelSummary();
+          ch.id = typeof d['id'] === 'string' ? (d['id'] as string) : '';
+          ch.name = typeof d['name'] === 'string' ? (d['name'] as string) : '';
+          ch.description = typeof d['description'] === 'string' ? (d['description'] as string) : '';
+          ch.subscribers = typeof d['subscribers'] === 'number' ? (d['subscribers'] as number) : 0;
+          ch.updates = typeof d['updates'] === 'number' ? (d['updates'] as number) : 0;
+          ch.invite = typeof d['invite'] === 'string' ? (d['invite'] as string) : '';
+          ch.pic = d['pic'] === true;
+          ch.avatarUrl = this.avatarUrlFor(ch.id);
+          out.push(ch);
+        }
+      }
+    }
+    this.channelsCache = out;
+    return out;
   }
 
-  async openChannelsTab(): Promise<ChatSummary[]> {
-    return [];
+  /** Expire the channel cache so the next call refetches. */
+  invalidateChannels(): void {
+    this.channelsCache = [];
   }
 
+  /** Follow/unfollow a WhatsApp channel. */
+  async followChannel(id: string): Promise<boolean> {
+    const body = JSON.stringify({ chat: id });
+    const resp = await this.httpJson('POST', '/channel/follow', body);
+    if (resp !== null) {
+      this.invalidateChannels();
+      return true;
+    }
+    return false;
+  }
+
+  async unfollowChannel(id: string): Promise<boolean> {
+    const body = JSON.stringify({ chat: id });
+    const resp = await this.httpJson('POST', '/channel/unfollow', body);
+    if (resp !== null) {
+      this.invalidateChannels();
+      return true;
+    }
+    return false;
+  }
+
+  /** Post a text status update to the backend (published to your status). */
+  async sendStatus(text: string): Promise<boolean> {
+    const body = JSON.stringify({ text: text });
+    const resp = await this.httpJson('POST', '/status-update', body);
+    return resp !== null;
+  }
+
+  /** Fetch the WhatsApp call history (audio + video, incoming + outgoing). */
+  async scrapeCalls(): Promise<CallRecord[]> {
+    const resp = await this.httpJson('GET', '/calls');
+    const out: CallRecord[] = [];
+    if (resp !== null) {
+      const arr = resp['calls'];
+      if (arr !== undefined && arr !== null) {
+        const items = arr as object[];
+        for (const item of items) {
+          const d = item as Record<string, Object>;
+          const c = new CallRecord();
+          c.id = typeof d['id'] === 'string' ? (d['id'] as string) : '';
+          c.peer = typeof d['peer'] === 'string' ? (d['peer'] as string) : '';
+          c.dir = typeof d['dir'] === 'string' ? (d['dir'] as string) : 'out';
+          c.video = d['video'] === true;
+          c.missed = d['missed'] === true;
+          const t = d['time'];
+          c.time = typeof t === 'number' ? this.formatTime(t as number) : '';
+          c.name = this.displayName(c.peer);
+          out.push(c);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Communities are the @g.us groups this account belongs to. */
   async scrapeCommunities(): Promise<ChatSummary[]> {
-    return [];
+    const out: ChatSummary[] = [];
+    for (const c of this.lastChats) {
+      if (c.id.indexOf('@g.us') >= 0) {
+        out.push(c);
+      }
+    }
+    return out;
   }
 
   async openCommunitiesTab(): Promise<ChatSummary[]> {
-    return [];
+    return this.scrapeCommunities();
+  }
+
+  async openChannelsTab(): Promise<ChatSummary[]> {
+    const out: ChatSummary[] = [];
+    for (const c of this.lastChats) {
+      if (c.isChannel) {
+        out.push(c);
+      }
+    }
+    return out;
   }
 
   async openArchived(): Promise<ChatSummary[]> {

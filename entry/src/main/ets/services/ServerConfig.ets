@@ -29,6 +29,7 @@ export class ServerConfig {
   static readonly BACKEND_FALLBACKS: string[] = [
     '127.0.0.1',
     'localhost',
+    '10.0.2.2',
   ];
 
   /** If true, the app auto-discovers the backend by probing known hosts. */

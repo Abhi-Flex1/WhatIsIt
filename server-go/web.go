@@ -40,6 +40,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/pair", s.guard(s.pair))
 	s.mux.HandleFunc("/pair-code", s.guard(s.pairCode))
 	s.mux.HandleFunc("/chats", s.guard(s.chats))
+	s.mux.HandleFunc("/calls", s.guard(s.callHistory))
+	s.mux.HandleFunc("/channels", s.guard(s.channels))
+	s.mux.HandleFunc("/avatar", s.guard(s.avatar))
+	s.mux.HandleFunc("/status-update", s.guard(s.postStatus))
+	s.mux.HandleFunc("/channel/follow", s.guard(s.followChannel))
+	s.mux.HandleFunc("/channel/unfollow", s.guard(s.unfollowChannel))
 	s.mux.HandleFunc("/messages", s.guard(s.messages))
 	s.mux.HandleFunc("/send", s.guard(s.send))
 	s.mux.HandleFunc("/send-media", s.guard(s.sendMedia))
@@ -459,6 +465,11 @@ func (s *Server) callCamera(w http.ResponseWriter, r *http.Request) {
 func (s *Server) callState(w http.ResponseWriter, r *http.Request) {
 	calls := s.state.Calls.List()
 	writeJSON(w, http.StatusOK, map[string]any{"calls": calls, "active": len(calls)})
+}
+
+// callHistory serves the persisted WhatsApp call history (GET /calls).
+func (s *Server) callHistory(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"calls": s.state.Store.Calls()})
 }
 
 // ---- passkey ----

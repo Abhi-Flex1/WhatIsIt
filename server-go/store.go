@@ -48,10 +48,21 @@ type conversation struct {
 	Pinned   bool      `json:"pinned"`
 }
 
+// CallRecord is one entry in the WhatsApp call history (audio/video, in/out).
+type CallRecord struct {
+	ID     string `json:"id"` // whatsmeow call id (unique)
+	Peer   string `json:"peer"` // JID
+	Dir    string `json:"dir"`  // "in" | "out"
+	Video  bool   `json:"video"`
+	Missed bool   `json:"missed"`
+	Time   int64  `json:"time"` // unix millis
+}
+
 type snapshot struct {
 	Chats map[string]*conversation `json:"chats"`
 	Names map[string]string        `json:"names"`
 	Phone string                   `json:"phone"`
+	Calls []CallRecord             `json:"calls"`
 }
 
 // HistoryStore is the in-memory chat/message store, persisted as history.json.
@@ -60,10 +71,12 @@ type HistoryStore struct {
 	chats        map[string]*conversation
 	names        map[string]string
 	phone        string
+	calls        []CallRecord
 	snapshotPath string
 }
 
 const maxMessages = 2000
+const maxCalls = 300
 
 // NewHistoryStore loads (or initializes) the store from <dbdir>/history.json.
 func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
@@ -85,6 +98,7 @@ func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
 			s.chats = snap.Chats
 			s.names = snap.Names
 			s.phone = snap.Phone
+			s.calls = snap.Calls
 		}
 	}
 	return s, nil
@@ -93,7 +107,7 @@ func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
 // Flush persists the store to history.json (best-effort, like store.rs::flush).
 func (s *HistoryStore) Flush() {
 	s.mu.Lock()
-	snap := snapshot{Chats: s.chats, Names: s.names, Phone: s.phone}
+	snap := snapshot{Chats: s.chats, Names: s.names, Phone: s.phone, Calls: s.calls}
 	s.mu.Unlock()
 	if b, err := json.Marshal(&snap); err == nil {
 		_ = os.MkdirAll(filepath.Dir(s.snapshotPath), 0o755)
@@ -229,11 +243,63 @@ func (s *HistoryStore) NameFor(jid string) string {
 	return jid
 }
 
+// MessageCount returns how many messages are stored for a chat (used to show
+// update counts for channels).
+func (s *HistoryStore) MessageCount(chat string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if conv, ok := s.chats[chat]; ok {
+		return len(conv.Messages)
+	}
+	return 0
+}
+
 // Phone returns the linked phone number.
 func (s *HistoryStore) Phone() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.phone
+}
+
+// AddCall appends a call-history entry (deduped by call id), capped at maxCalls.
+func (s *HistoryStore) AddCall(rec CallRecord) {
+	if rec.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.calls {
+		if s.calls[i].ID == rec.ID {
+			s.calls[i] = rec
+			return
+		}
+	}
+	s.calls = append(s.calls, rec)
+	if len(s.calls) > maxCalls {
+		s.calls = s.calls[len(s.calls)-maxCalls:]
+	}
+}
+
+// MarkCallAnswered flips a recorded incoming call from missed to answered.
+func (s *HistoryStore) MarkCallAnswered(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.calls {
+		if s.calls[i].ID == id {
+			s.calls[i].Missed = false
+			return
+		}
+	}
+}
+
+// Calls returns the call history sorted newest-first (same shape as store.rs).
+func (s *HistoryStore) Calls() []CallRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CallRecord, len(s.calls))
+	copy(out, s.calls)
+	sort.Slice(out, func(i, j int) bool { return out[i].Time > out[j].Time })
+	return out
 }
 
 // Chats returns the chat list sorted pinned-first then by last-message time
