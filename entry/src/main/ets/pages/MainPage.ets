@@ -11,12 +11,16 @@ import { AppLifecycle } from '../services/AppLifecycle';
 import { securityBootBarrier } from '../services/SecurityBootBarrier';
 import { ChatListView } from './ChatListView';
 import { ChatThreadView } from './ChatThreadView';
+import { NewChatView } from './NewChatView';
+import { ChannelDirectoryView } from './ChannelDirectoryView';
+import { StatusComposerView } from './StatusComposerView';
+import { ContactPickerService } from '../services/ContactPickerService';
 import { ServerConfig } from '../services/ServerConfig';
 
 const TAG = 'MainPage';
 const DOMAIN = 0x0000;
 
-type ShellView = 'connect' | 'chats' | 'thread';
+type ShellView = 'connect' | 'chats' | 'thread' | 'newchat' | 'channels' | 'statuscomposer';
 
 @Entry
 @Component
@@ -183,6 +187,7 @@ struct MainPage {
     if (this.view !== 'connect') {
       return;
     }
+    await cdpBridge.discoverBackend();
     const linked = await cdpBridge.isLinked();
     if (linked) {
       this.view = 'chats';
@@ -200,6 +205,7 @@ struct MainPage {
   private async connect(): Promise<void> {
     this.connecting = true;
     this.errorMsg = '';
+    await cdpBridge.discoverBackend();
     const linked = await cdpBridge.isLinked();
     this.connecting = false;
     if (linked) {
@@ -374,6 +380,45 @@ struct MainPage {
     });
   }
 
+  /** Connect screen: simple fade. */
+  private connectTransition(): TransitionEffect {
+    return TransitionEffect.OPACITY;
+  }
+
+  /** Chats list: light rise + fade (tab-like). */
+  private chatsTransition(): TransitionEffect {
+    return TransitionEffect.translate({ y: 24 }).combine(TransitionEffect.OPACITY);
+  }
+
+  /** Thread: iOS-style push-in from the right. */
+  private threadTransition(): TransitionEffect {
+    return TransitionEffect.asymmetric(
+      TransitionEffect.translate({ x: '30%' }).combine(TransitionEffect.OPACITY),
+      TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
+    );
+  }
+
+  /** New Chat sheet: full slide-in from the right. */
+  private newchatTransition(): TransitionEffect {
+    return TransitionEffect.asymmetric(
+      TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY),
+      TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
+    );
+  }
+
+  /** Channel directory: iOS-style push-in from the right. */
+  private channelsTransition(): TransitionEffect {
+    return TransitionEffect.asymmetric(
+      TransitionEffect.translate({ x: '30%' }).combine(TransitionEffect.OPACITY),
+      TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
+    );
+  }
+
+  /** Status composer: bottom-sheet-style rise. */
+  private composerTransition(): TransitionEffect {
+    return TransitionEffect.translate({ y: '40%' }).combine(TransitionEffect.OPACITY);
+  }
+
   /** Hand off the current chat to another HarmonyOS device (App Continuation). */
   private async handOff(): Promise<void> {
     try {
@@ -397,10 +442,10 @@ struct MainPage {
           Text('Device not trusted')
             .fontSize(22)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#EA4335')
+            .fontColor($r('app.color.danger'))
           Text('This device failed the hardware integrity check. Chats are locked and local credentials have been wiped.')
             .fontSize(14)
-            .fontColor('#54656F')
+            .fontColor($r('app.color.ink_subtle'))
             .textAlign(TextAlign.Center)
             .padding({ left: 24, right: 24 })
         }
@@ -415,10 +460,10 @@ struct MainPage {
           Text('Link your WhatsApp')
             .fontSize(22)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#111B21')
+            .fontColor($r('app.color.ink'))
           Text('Open WhatsApp on your phone, tap Linked Devices > Link a Device, and scan this QR code.')
             .fontSize(14)
-            .fontColor('#54656F')
+            .fontColor($r('app.color.ink_subtle'))
             .textAlign(TextAlign.Center)
             .padding({ left: 24, right: 24 })
 
@@ -435,10 +480,10 @@ struct MainPage {
                 LoadingProgress()
                   .width(40)
                   .height(40)
-                  .color('#00A884')
+                  .color($r('app.color.brand'))
                 Text('Waiting for a QR code…')
                   .fontSize(13)
-                  .fontColor('#54656F')
+                  .fontColor($r('app.color.ink_subtle'))
               }
               .width(240)
               .height(240)
@@ -453,7 +498,7 @@ struct MainPage {
 
           Text('The code refreshes automatically. No browser or PC needed after linking.')
             .fontSize(12)
-            .fontColor('#54656F')
+            .fontColor($r('app.color.ink_subtle'))
             .textAlign(TextAlign.Center)
             .padding({ left: 24, right: 24 })
 
@@ -462,8 +507,8 @@ struct MainPage {
             .width('70%')
             .height(44)
             .backgroundColor('#FFFFFF')
-            .fontColor('#00A884')
-            .border({ width: 1, color: '#00A884' })
+            .fontColor($r('app.color.brand'))
+            .border({ width: 1, color: $r('app.color.brand') })
             .borderRadius(22)
             .onClick(() => {
               this.showPhoneLink = !this.showPhoneLink;
@@ -473,7 +518,7 @@ struct MainPage {
             Column({ space: 12 }) {
               Text('Enter your phone number to get an 8-character code, then tap Link a Device > Link with phone number instead in WhatsApp.')
                 .fontSize(12)
-                .fontColor('#54656F')
+                .fontColor($r('app.color.ink_subtle'))
                 .textAlign(TextAlign.Center)
 
               Row({ space: 8 }) {
@@ -502,7 +547,7 @@ struct MainPage {
               Button(this.pairBusy ? 'Requesting…' : 'Get code')
                 .width('100%')
                 .height(44)
-                .backgroundColor('#00A884')
+                .backgroundColor($r('app.color.brand'))
                 .fontColor('#FFFFFF')
                 .enabled(!this.pairBusy)
                 .onClick(() => {
@@ -512,7 +557,7 @@ struct MainPage {
               if (this.pairError.length > 0) {
                 Text(this.pairError)
                   .fontSize(12)
-                  .fontColor('#EA4335')
+                  .fontColor($r('app.color.danger'))
                   .textAlign(TextAlign.Center)
               }
 
@@ -520,18 +565,18 @@ struct MainPage {
                 Column({ space: 6 }) {
                   Text('Enter this 8-character code in WhatsApp (Link with phone number instead):')
                     .fontSize(11)
-                    .fontColor('#54656F')
+                    .fontColor($r('app.color.ink_subtle'))
                     .textAlign(TextAlign.Center)
                   Row({ space: 2 }) {
                     ForEach(this.pairCodeText.split(''), (ch: string) => {
                       Text(ch)
                         .fontSize(18)
                         .fontWeight(FontWeight.Bold)
-                        .fontColor('#111B21')
+                        .fontColor($r('app.color.ink'))
                         .height(34)
                         .layoutWeight(1)
                         .textAlign(TextAlign.Center)
-                        .backgroundColor('#F0F2F5')
+                        .backgroundColor($r('app.color.bg_page'))
                         .borderRadius(5)
                         .border({ width: 1, color: '#DDDDDD' })
                     }, (ch: string, idx: number) => idx + ch)
@@ -554,27 +599,27 @@ struct MainPage {
               Text('WhatsApp security check')
                 .fontSize(14)
                 .fontWeight(FontWeight.Bold)
-                .fontColor('#111B21')
+                .fontColor($r('app.color.ink'))
               Text('WhatsApp wants to verify this device with a passkey. Complete the check to finish linking.')
                 .fontSize(12)
-                .fontColor('#54656F')
+                .fontColor($r('app.color.ink_subtle'))
                 .textAlign(TextAlign.Center)
 
               if (this.passkeyCode.length > 0) {
                 Text('Verification code — enter it in WhatsApp if asked:')
                   .fontSize(12)
-                  .fontColor('#54656F')
+                  .fontColor($r('app.color.ink_subtle'))
                   .textAlign(TextAlign.Center)
                  Text(this.passkeyCode)
                    .fontSize(24)
                    .fontWeight(FontWeight.Bold)
-                   .fontColor('#111B21')
+                   .fontColor($r('app.color.ink'))
                    .letterSpacing(4)
                    .textAlign(TextAlign.Center)
                 Button(this.passkeyBusy ? 'Confirming…' : 'I entered the code — Confirm')
                   .width('100%')
                   .height(42)
-                  .backgroundColor('#00A884')
+                  .backgroundColor($r('app.color.brand'))
                   .fontColor('#FFFFFF')
                   .enabled(!this.passkeyBusy)
                   .onClick(() => {
@@ -583,7 +628,7 @@ struct MainPage {
               } else if (this.passkeyPending) {
                 Text('No native WebAuthn API on this SDK yet — paste the assertion JSON from a real authenticator to continue.')
                   .fontSize(11)
-                  .fontColor('#54656F')
+                  .fontColor($r('app.color.ink_subtle'))
                   .textAlign(TextAlign.Center)
                 TextInput({ text: this.assertionInput, placeholder: 'Paste WebAuthn assertion JSON' })
                   .width('100%')
@@ -595,7 +640,7 @@ struct MainPage {
                 Button(this.passkeyBusy ? 'Submitting…' : 'Submit assertion')
                   .width('100%')
                   .height(42)
-                  .backgroundColor('#00A884')
+                  .backgroundColor($r('app.color.brand'))
                   .fontColor('#FFFFFF')
                   .enabled(!this.passkeyBusy && this.assertionInput.length > 0)
                   .onClick(() => {
@@ -605,7 +650,7 @@ struct MainPage {
                   .width('100%')
                   .height(38)
                   .backgroundColor('#FFFFFF')
-                  .fontColor('#54656F')
+                  .fontColor($r('app.color.ink_subtle'))
                   .border({ width: 1, color: '#DDDDDD' })
                   .borderRadius(19)
                   .onClick(() => {
@@ -616,14 +661,14 @@ struct MainPage {
               if (this.passkeyError.length > 0) {
                 Text(this.passkeyError)
                   .fontSize(12)
-                  .fontColor('#EA4335')
+                  .fontColor($r('app.color.danger'))
                   .textAlign(TextAlign.Center)
                 Button('Retry security check')
                   .width('100%')
                   .height(36)
                   .backgroundColor('#FFFFFF')
-                  .fontColor('#00A884')
-                  .border({ width: 1, color: '#00A884' })
+                  .fontColor($r('app.color.brand'))
+                  .border({ width: 1, color: $r('app.color.brand') })
                   .borderRadius(18)
                   .onClick(() => {
                     this.refreshPasskey();
@@ -642,8 +687,8 @@ struct MainPage {
             .width('70%')
             .height(44)
             .backgroundColor('#FFFFFF')
-            .fontColor('#00A884')
-            .border({ width: 1, color: '#00A884' })
+            .fontColor($r('app.color.brand'))
+            .border({ width: 1, color: $r('app.color.brand') })
             .borderRadius(22)
             .onClick(() => {
               this.toggleProvisionQR();
@@ -653,7 +698,7 @@ struct MainPage {
             Column({ space: 12 }) {
               Text('Scan this QR with another WhatIsIt device to auto-configure the backend.')
                 .fontSize(12)
-                .fontColor('#54656F')
+                .fontColor($r('app.color.ink_subtle'))
                 .textAlign(TextAlign.Center)
               Stack() {
                 if (this.provisionUrl.length > 0) {
@@ -685,7 +730,7 @@ struct MainPage {
           Button(this.connecting ? 'Connecting…' : 'Refresh QR')
             .width('70%')
             .height(48)
-            .backgroundColor('#00A884')
+            .backgroundColor($r('app.color.brand'))
             .fontColor('#FFFFFF')
             .enabled(!this.connecting)
             .onClick(() => {
@@ -694,7 +739,7 @@ struct MainPage {
           if (this.errorMsg.length > 0) {
             Text(this.errorMsg)
               .fontSize(13)
-              .fontColor('#EA4335')
+              .fontColor($r('app.color.danger'))
               .textAlign(TextAlign.Center)
               .padding({ left: 24, right: 24 })
           }
@@ -703,12 +748,12 @@ struct MainPage {
           .width('100%')
           .constraintSize({ minHeight: '100%' })
           .padding(24)
-          .backgroundColor('#F0F2F5')
+          .backgroundColor($r('app.color.bg_page'))
         }
         .scrollBar(BarState.Auto)
         .width('100%')
         .height('100%')
-        .transition(TransitionEffect.OPACITY)
+        .transition(this.connectTransition())
       } else if (this.view === 'chats') {
         ChatListView({ onOpenChat: (name: string) => {
           this.openThread(name);
@@ -717,21 +762,54 @@ struct MainPage {
           this.stopQrPoll();
         }, onHandOff: () => {
           this.handOff();
+        }, onNewChat: () => {
+          this.view = 'newchat';
+        }, onComposeStatus: () => {
+          this.view = 'statuscomposer';
+        }, onFindChannels: () => {
+          this.view = 'channels';
         } })
           .width('100%')
           .height('100%')
-          .transition(TransitionEffect.OPACITY)
+          .transition(this.chatsTransition())
+      } else if (this.view === 'newchat') {
+        NewChatView({ onBack: () => {
+          this.view = 'chats';
+        }, onPick: (digits: string) => {
+          this.openThread(ContactPickerService.toWhatsAppJid(digits));
+        } })
+          .width('100%')
+          .height('100%')
+          .transition(this.newchatTransition())
+      } else if (this.view === 'channels') {
+        ChannelDirectoryView({ onBack: () => {
+          this.view = 'chats';
+        }, onOpenChannel: (id: string) => {
+          this.openThread(id);
+        } })
+          .width('100%')
+          .height('100%')
+          .transition(this.channelsTransition())
+      } else if (this.view === 'statuscomposer') {
+        StatusComposerView({ onBack: () => {
+          this.view = 'chats';
+        }, onPosted: () => {
+          this.view = 'chats';
+        } })
+          .width('100%')
+          .height('100%')
+          .transition(this.composerTransition())
       } else if (this.view === 'thread') {
         ChatThreadView({ chatName: this.chatName, onBack: () => {
           this.backToChats();
         } })
           .width('100%')
           .height('100%')
-          .transition(TransitionEffect.OPACITY)
+          .transition(this.threadTransition())
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F0F2F5')
+    .backgroundColor($r('app.color.bg_page'))
   }
 }

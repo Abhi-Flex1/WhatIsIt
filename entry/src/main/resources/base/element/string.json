@@ -35,6 +35,10 @@
     {
       "name": "distributed_datasync_reason",
       "value": "Hand off your chat to another HarmonyOS device"
+    },
+    {
+      "name": "contacts_permission_reason",
+      "value": "Show your address-book contacts in the in-app New Chat list"
     }
   ]
 }

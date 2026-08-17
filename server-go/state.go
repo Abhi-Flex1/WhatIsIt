@@ -44,6 +44,10 @@ type AppState struct {
 	Calls *CallRegistry
 	// Media cache (downloads incoming media; serves /media/{id}/{kind}).
 	Media *mediaCache
+	// Avatar cache (serves /avatar?chat=...).
+	Avatars *avatarCache
+	// Followed-channel metadata cache (serves /channels).
+	ChannelCache *channelCache
 }
 
 // NewAppState builds the shared state.
@@ -53,11 +57,13 @@ func NewAppState(cfg *Config) (*AppState, error) {
 		return nil, err
 	}
 	return &AppState{
-		Cfg:   cfg,
-		Store: store,
-		Bus:   NewEventBus(),
-		Calls: NewCallRegistry(),
-		Media: newMediaCache(cfg.MediaDir),
+		Cfg:          cfg,
+		Store:        store,
+		Bus:          NewEventBus(),
+		Calls:        NewCallRegistry(),
+		Media:        newMediaCache(cfg.MediaDir),
+		Avatars:      newAvatarCache(cfg.DBPath),
+		ChannelCache: &channelCache{},
 	}, nil
 }
 

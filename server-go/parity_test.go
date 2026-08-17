@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,7 @@ import (
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
-	cfg := &Config{Token: "", Port: "0", Host: "127.0.0.1", DBPath: ":memory:", MediaDir: t.TempDir()}
+	cfg := &Config{Token: "", Port: "0", Host: "127.0.0.1", DBPath: filepath.Join(t.TempDir(), "test.db"), MediaDir: t.TempDir()}
 	state, err := NewAppState(cfg)
 	if err != nil {
 		t.Fatalf("NewAppState: %v", err)
@@ -148,7 +149,7 @@ func TestSendShape(t *testing.T) {
 
 // TestNotLinked: endpoints return 403 when not linked.
 func TestNotLinked(t *testing.T) {
-	cfg := &Config{Token: "", Port: "0", Host: "127.0.0.1", DBPath: ":memory:", MediaDir: t.TempDir()}
+	cfg := &Config{Token: "", Port: "0", Host: "127.0.0.1", DBPath: filepath.Join(t.TempDir(), "test.db"), MediaDir: t.TempDir()}
 	state, _ := NewAppState(cfg)
 	s := NewServer(state, nil)
 	for _, path := range []string{"/chats", "/messages?chat=x"} {
@@ -164,7 +165,7 @@ func TestNotLinked(t *testing.T) {
 
 // TestAuth: with a token set, requests without it → 401 {"error":"unauthorized"}.
 func TestAuth(t *testing.T) {
-	cfg := &Config{Token: "secret", Port: "0", Host: "127.0.0.1", DBPath: ":memory:", MediaDir: t.TempDir()}
+	cfg := &Config{Token: "secret", Port: "0", Host: "127.0.0.1", DBPath: filepath.Join(t.TempDir(), "test.db"), MediaDir: t.TempDir()}
 	state, _ := NewAppState(cfg)
 	s := NewServer(state, nil)
 	w, m := doReq(t, s, "GET", "/status", "")
