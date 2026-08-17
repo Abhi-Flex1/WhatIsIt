@@ -451,17 +451,19 @@ export class CdpBridge {
 
   async getStatus(): Promise<StatusResponse | null> {
     // Embedded engine (in-app "server"): read status directly via NAPI.
-    const engRaw = waEngine.status();
-    if (engRaw.length > 0) {
-      try {
-        const parsed = JSON.parse(engRaw) as Record<string, Object>;
-        return {
-          linked: parsed['linked'] === true,
-          phone: typeof parsed['phone'] === 'string' ? (parsed['phone'] as string) : '',
-          qr: typeof parsed['qr'] === 'string' ? (parsed['qr'] as string) : '',
-        } as StatusResponse;
-      } catch (e) {
-        // fall through to HTTP
+    if (waEngine.isReady()) {
+      const engRaw = waEngine.status();
+      if (engRaw.length > 0) {
+        try {
+          const parsed = JSON.parse(engRaw) as Record<string, Object>;
+          return {
+            linked: parsed['linked'] === true,
+            phone: typeof parsed['phone'] === 'string' ? (parsed['phone'] as string) : '',
+            qr: typeof parsed['qr'] === 'string' ? (parsed['qr'] as string) : '',
+          } as StatusResponse;
+        } catch (e) {
+          // fall through to HTTP
+        }
       }
     }
     const resp = await this.httpJson('GET', '/status');
@@ -488,7 +490,7 @@ export class CdpBridge {
       waEngine.startPairing();
       return true;
     }
-    const resp = await this.httpJson('POST', '/pair/start');
+    const resp = await this.httpJson('POST', '/pair');
     return resp !== null;
   }
 
@@ -509,12 +511,22 @@ export class CdpBridge {
     }
     if (waEngine.isReady()) {
       waEngine.pairCode(full);
-    } else {
-      const body = JSON.stringify({ country, phone, full });
-      await this.httpJson('POST', '/pair/code', body);
+      return '';
     }
-    // The 8-char code arrives via the pair_code event (MainPage listener).
-    return '';
+    const body = JSON.stringify({ country, phone, full });
+    const resp = await this.httpJson('POST', '/pair-code', body);
+    if (resp === null) {
+      throw new Error('pair-code request failed');
+    }
+    // The backend surfaces the error message (e.g. WhatsApp rate-limit).
+    if (resp['error'] !== undefined) {
+      const msg = resp['error'];
+      throw new Error(typeof msg === 'string' ? (msg as string) : 'pair-code request failed');
+    }
+    // Return the 8-char code from the HTTP response so the UI shows it
+    // immediately; the pair_code WS event is a backup path.
+    const code = resp['code'];
+    return typeof code === 'string' ? (code as string) : '';
   }
 
   async logout(): Promise<boolean> {
