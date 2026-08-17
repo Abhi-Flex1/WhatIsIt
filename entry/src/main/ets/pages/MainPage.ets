@@ -236,6 +236,9 @@ struct MainPage {
 
   /** Request an 8-char code for the phone-number linking flow. */
   private async startPhonePair(): Promise<void> {
+    if (this.pairBusy) {
+      return;
+    }
     this.pairBusy = true;
     this.pairError = '';
     this.pairCodeText = '';
@@ -245,10 +248,20 @@ struct MainPage {
       this.pairBusy = false;
       return;
     }
+    let code = '';
     try {
-      await cdpBridge.pairCode(this.phoneCountry, digits);
+      code = await cdpBridge.pairCode(this.phoneCountry, digits);
     } catch (err) {
-      this.pairError = 'Failed to request code. Is the backend running?';
+      const msg = (err as Error)?.message;
+      this.pairError = msg !== undefined && msg.length > 0
+        ? msg
+        : 'Failed to request code. Is the backend running?';
+      this.pairBusy = false;
+      return;
+    }
+    if (code.length > 0) {
+      // The 8-char code came straight back from the HTTP response.
+      this.pairCodeText = code;
       this.pairBusy = false;
       return;
     }
@@ -396,7 +409,8 @@ struct MainPage {
         .justifyContent(FlexAlign.Center)
         .backgroundColor('#FFFFFF')
       } else if (this.view === 'connect') {
-        Column({ space: 16 }) {
+        Scroll() {
+          Column({ space: 16 }) {
           Blank()
           Text('Link your WhatsApp')
             .fontSize(22)
@@ -502,30 +516,27 @@ struct MainPage {
                   .textAlign(TextAlign.Center)
               }
 
-              if (this.pairCodeText.length === 8) {
+              if (this.pairCodeText.length > 0) {
                 Column({ space: 6 }) {
                   Text('Enter this 8-character code in WhatsApp (Link with phone number instead):')
                     .fontSize(11)
                     .fontColor('#54656F')
                     .textAlign(TextAlign.Center)
-                  Row({ space: 4 }) {
-                    Text('+' + this.phoneCountry)
-                      .fontSize(11)
-                      .fontColor('#00A884')
-                      .fontWeight(FontWeight.Bold)
+                  Row({ space: 2 }) {
                     ForEach(this.pairCodeText.split(''), (ch: string) => {
                       Text(ch)
-                        .fontSize(20)
+                        .fontSize(18)
                         .fontWeight(FontWeight.Bold)
                         .fontColor('#111B21')
-                        .width(32)
-                        .height(40)
+                        .height(34)
+                        .layoutWeight(1)
                         .textAlign(TextAlign.Center)
                         .backgroundColor('#F0F2F5')
-                        .borderRadius(6)
+                        .borderRadius(5)
                         .border({ width: 1, color: '#DDDDDD' })
-                    }, (ch: string) => ch)
+                    }, (ch: string, idx: number) => idx + ch)
                   }
+                  .width('100%')
                   .justifyContent(FlexAlign.Center)
                 }
               }
@@ -688,11 +699,15 @@ struct MainPage {
               .padding({ left: 24, right: 24 })
           }
           Blank()
+          }
+          .width('100%')
+          .constraintSize({ minHeight: '100%' })
+          .padding(24)
+          .backgroundColor('#F0F2F5')
         }
+        .scrollBar(BarState.Auto)
         .width('100%')
         .height('100%')
-        .padding(24)
-        .backgroundColor('#F0F2F5')
         .transition(TransitionEffect.OPACITY)
       } else if (this.view === 'chats') {
         ChatListView({ onOpenChat: (name: string) => {

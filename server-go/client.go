@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -26,6 +28,9 @@ type WAClient struct {
 	// QR stream (active while pairing).
 	qrCh <-chan whatsmeow.QRChannelItem
 	cancelQR context.CancelFunc
+	// pairMu serializes pairing (re)starts so concurrent /pair calls don't
+	// tear down a live QR stream.
+	pairMu sync.Mutex
 	// Passkey request options currently pending (recoverable via /passkey/request).
 	passkeyOpts string
 }
@@ -67,6 +72,29 @@ func (wc *WAClient) Connect(ctx context.Context) error {
 	return nil
 }
 
+// StartPairing (re)starts the QR pairing stream. If a QR stream is already
+// active and the client is connected it is a no-op (the existing codes keep
+// rotating). If already linked it is a no-op too.
+func (wc *WAClient) StartPairing(ctx context.Context) error {
+	wc.pairMu.Lock()
+	defer wc.pairMu.Unlock()
+	if wc.cli.Store.ID != nil {
+		return nil
+	}
+	if wc.qrCh != nil && wc.cli.IsConnected() {
+		return nil
+	}
+	if wc.cancelQR != nil {
+		wc.cancelQR()
+		wc.cancelQR = nil
+	}
+	if wc.cli.IsConnected() {
+		wc.cli.Disconnect()
+	}
+	wc.startQR(ctx)
+	return wc.cli.Connect()
+}
+
 // startQR begins the QR pairing stream and pushes codes via the event bus.
 func (wc *WAClient) startQR(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -77,6 +105,7 @@ func (wc *WAClient) startQR(ctx context.Context) {
 		return
 	}
 	wc.qrCh = ch
+	wc.cancelQR = cancel
 	go func() {
 		for item := range ch {
 			switch item.Event {
@@ -88,12 +117,43 @@ func (wc *WAClient) startQR(ctx context.Context) {
 				wc.state.Bus.Publish(EvQr(""))
 			}
 		}
+		// Channel closed by whatsmeow (timeout/error). It has called
+		// cli.Disconnect(); wait for that teardown to finish so the fresh
+		// socket isn't killed by the old one, then restart pairing.
+		if wc.cli.Store.ID == nil {
+			for i := 0; i < 50 && wc.cli.IsConnected(); i++ {
+				time.Sleep(100 * time.Millisecond)
+			}
+			if err := wc.StartPairing(context.Background()); err != nil {
+				log.Printf("restart pairing after QR timeout: %v", err)
+			}
+		}
 	}()
 }
 
 // PairCode starts phone-number linking and returns the 8-char code.
 func (wc *WAClient) PairCode(ctx context.Context, phone string) (string, error) {
-	code, err := wc.cli.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "WhatIsIt")
+	wc.pairMu.Lock()
+	defer wc.pairMu.Unlock()
+	if wc.cli.Store.ID != nil {
+		return "", fmt.Errorf("device already linked; log out first")
+	}
+	if !wc.cli.IsConnected() {
+		// The 8-char flow needs a live socket. Make sure the QR pairing
+		// stream is running (this also dials WhatsApp), then wait for it.
+		if wc.qrCh == nil {
+			wc.startQR(ctx)
+		}
+		if err := wc.cli.Connect(); err != nil {
+			return "", fmt.Errorf("connect: %w", err)
+		}
+		select {
+		case <-wc.qrCh:
+		case <-time.After(5 * time.Second):
+			return "", fmt.Errorf("timed out waiting for connection")
+		}
+	}
+	code, err := wc.cli.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Windows)")
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +203,17 @@ func (wc *WAClient) onLinked(e *events.PairSuccess) {
 func (wc *WAClient) onLoggedOut() {
 	wc.state.SetPhone("")
 	wc.state.Store.SetPhone("")
+	wc.state.SetQR("")
 	wc.state.Bus.Publish(EvLoggedOut())
+	// The QR goroutine already exited (it closed on pair success), so the
+	// client is disconnected with no live QR. Restart pairing so the app gets
+	// a fresh QR and a live socket for the 8-char flow too.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if err := wc.StartPairing(context.Background()); err != nil {
+			log.Printf("restart pairing after logout: %v", err)
+		}
+	}()
 }
 
 func (wc *WAClient) onPasskeyRequest(e *events.PairPasskeyRequest) {

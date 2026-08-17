@@ -64,6 +64,9 @@ func (s *Server) routes() {
 // guard wraps a handler with the auth check (mirrors web.rs authorized/reject).
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			log.Printf("REQ %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		}
 		if !authorized(r, s.state.Cfg) {
 			reject(w)
 			return
@@ -105,7 +108,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
-	// whatsmeow starts pairing automatically when no session; nothing to do.
+	// Restart the QR pairing stream so a fresh code is always available.
+	if err := s.wa.StartPairing(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -140,7 +147,7 @@ func (s *Server) pairCode(w http.ResponseWriter, r *http.Request) {
 	code, err := s.wa.PairCode(r.Context(), country+phone)
 	if err != nil {
 		log.Printf("pair-code failed: %v", err)
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "pair-code failed"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "code": code})

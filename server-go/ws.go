@@ -46,7 +46,55 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 	go s.relayMediaOut(conn, done)
 
-	// Main loop: events → text frames; app binary frames → media sources.
+	// Reader goroutine: app binary frames → media sources. The main loop
+	// below must not block on ReadMessage or it would stall event delivery.
+	readDone := make(chan struct{})
+	defer close(readDone)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			// Text frames are ignored by the Rust server; binary frames are media.
+			if len(data) == 0 {
+				continue
+			}
+			tag := data[0]
+			payload := data[1:]
+			if len(payload) == 0 {
+				continue
+			}
+			calls := s.state.Calls.List()
+			if len(calls) == 0 {
+				continue
+			}
+			relay := s.state.Calls.Get(calls[0].CallID)
+			if relay == nil {
+				continue
+			}
+			switch tag {
+			case FrameTagAudio: // mic PCM s16le → meowcaller audio source
+				select {
+				case relay.micCh <- payload:
+				default:
+				}
+			case FrameTagVideo: // camera H.264 AU → meowcaller video source
+				select {
+				case relay.camCh <- payload:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Main loop: events → text frames. ReadMessage lives in its own goroutine
+	// so events are never stalled behind a blocking socket read.
 	for {
 		select {
 		case ev, ok := <-sub:
@@ -56,42 +104,8 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 			if err := conn.WriteMessage(websocket.TextMessage, ev.Marshal()); err != nil {
 				return
 			}
-		default:
-		}
-		// Read next message (blocking) — events are drained in a separate
-		// tick below.
-		_, data, err := conn.ReadMessage()
-		if err != nil {
+		case <-done:
 			return
-		}
-		// Text frames are ignored by the Rust server; binary frames are media.
-		if len(data) == 0 {
-			continue
-		}
-		tag := data[0]
-		payload := data[1:]
-		if len(payload) == 0 {
-			continue
-		}
-		calls := s.state.Calls.List()
-		if len(calls) == 0 {
-			continue
-		}
-		relay := s.state.Calls.Get(calls[0].CallID)
-		if relay == nil {
-			continue
-		}
-		switch tag {
-		case FrameTagAudio: // mic PCM s16le → meowcaller audio source
-			select {
-			case relay.micCh <- payload:
-			default:
-			}
-		case FrameTagVideo: // camera H.264 AU → meowcaller video source
-			select {
-			case relay.camCh <- payload:
-			default:
-			}
 		}
 	}
 }
