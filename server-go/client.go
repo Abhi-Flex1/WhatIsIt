@@ -278,9 +278,26 @@ func (wc *WAClient) onMessage(e *events.Message) {
 	}
 	// Upsert + broadcast.
 	wc.state.Store.UpsertMessage(msg)
-	// Update chat preview name.
-	if e.Info.Sender.User != "" {
-		wc.state.Store.SetName(chat, jidToName(e.Info.Sender))
+	// Status posts live in the status@broadcast chat: record the latest update
+	// per contact for the Status tab. They must never appear as a normal chat
+	// (Chats() filters @broadcast) or take the sender's number as a name.
+	if e.Info.Chat.Server == types.BroadcastServer && !e.Info.IsFromMe && e.Info.Sender.User != "" {
+		wc.state.Store.AddStatus(StatusEntry{
+			Sender: e.Info.Sender.String(),
+			Name:   wc.contactName(e.Info.Sender),
+			Text:   msg.Text,
+			Kind:   statusKind(msg),
+			Time:   msg.Time,
+			Media:  msg.Media,
+		})
+	}
+	// Update the chat preview name — 1:1 chats only. Group subjects come from
+	// history sync (never overwrite them with a member's number), and a
+	// numeric-only name never beats a name history sync already stored.
+	if !e.Info.IsFromMe && e.Info.Chat.Server == types.DefaultUserServer && e.Info.Chat.User == e.Info.Sender.User {
+		if name := wc.contactName(e.Info.Sender); name != "" && name != e.Info.Sender.User {
+			wc.state.Store.SetName(chat, name)
+		}
 	}
 	wc.state.Bus.Publish(EvMessage(chat))
 }
@@ -315,6 +332,36 @@ func (wc *WAClient) SendText(ctx context.Context, jid types.JID, text, replyTo s
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// RequestHistoryBackfill asks the phone's primary device for up to `count`
+// messages older than the oldest message we hold for `chat` (whatsmeow's
+// on-demand history sync — the same mechanism WhatsApp Web uses when you scroll
+// up). The result arrives later as an events.HistorySync (type ON_DEMAND) which
+// onHistorySync ingests into the store.
+func (wc *WAClient) RequestHistoryBackfill(ctx context.Context, chat types.JID, count int) error {
+	oldest := wc.state.Store.OldestMessage(chat.String())
+	if oldest == nil {
+		return fmt.Errorf("no messages stored for %s; nothing to backfill before", chat)
+	}
+	if count <= 0 {
+		count = 50
+	}
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     chat,
+			IsFromMe: oldest.FromMe,
+		},
+		ID:        types.MessageID(oldest.ID),
+		Timestamp: time.UnixMilli(oldest.Time),
+	}
+	req := wc.cli.BuildHistorySyncRequest(info, count)
+	_, err := wc.cli.SendPeerMessage(ctx, req)
+	if err != nil {
+		return fmt.Errorf("request backfill: %w", err)
+	}
+	log.Printf("history backfill requested for %s: %d messages before %s", chat, count, oldest.ID)
+	return nil
 }
 
 // Logout disconnects and clears the stored session.
@@ -432,13 +479,31 @@ func (wc *WAClient) IsConnected() bool { return wc.cli.IsConnected() }
 
 // ---- helpers ----
 
-// jidToName derives a display name from a JID (matches app expectations: the
-// phone number for a user, the group subject for a group).
-func jidToName(jid types.JID) string {
-	if jid.Server == types.DefaultUserServer {
+// contactName resolves the display name for a user JID: the user's saved
+// contact name (FullName), then their WhatsApp push name, then the bare
+// number. Non-user JIDs (groups, broadcasts) fall back to the local part.
+func (wc *WAClient) contactName(jid types.JID) string {
+	if jid.Server != types.DefaultUserServer {
 		return jid.User
 	}
+	if wc.cli != nil && wc.cli.Store != nil && wc.cli.Store.Contacts != nil {
+		if c, err := wc.cli.Store.Contacts.GetContact(context.Background(), jid); err == nil {
+			for _, n := range []string{c.FullName, c.PushName, c.FirstName, c.BusinessName} {
+				if n != "" {
+					return n
+				}
+			}
+		}
+	}
 	return jid.User
+}
+
+// statusKind labels a status update for the Status tab (media kind or text).
+func statusKind(msg Message) string {
+	if msg.Media != nil {
+		return msg.Media.Kind
+	}
+	return "text"
 }
 
 func mustJSON(v any) string {

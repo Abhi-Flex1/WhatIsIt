@@ -2,19 +2,19 @@
   "color": [
     {
       "name": "start_window_background",
-      "value": "#FFFFFF"
+      "value": "#F1F3F5"
     },
     {
       "name": "brand",
-      "value": "#00A884"
+      "value": "#007DFF"
     },
     {
       "name": "brand_pressed",
-      "value": "#008A6B"
+      "value": "#0066CC"
     },
     {
       "name": "brand_soft",
-      "value": "#E7FCE3"
+      "value": "#E7F0FF"
     },
     {
       "name": "brand_text",
@@ -22,11 +22,11 @@
     },
     {
       "name": "bg_page",
-      "value": "#F0F2F5"
+      "value": "#F1F3F5"
     },
     {
       "name": "bg_chat",
-      "value": "#EFEAE2"
+      "value": "#F5F6F8"
     },
     {
       "name": "surface",
@@ -34,11 +34,11 @@
     },
     {
       "name": "surface_pressed",
-      "value": "#F0F2F5"
+      "value": "#F1F3F5"
     },
     {
       "name": "surface_subtle",
-      "value": "#F5F6F7"
+      "value": "#F2F4F7"
     },
     {
       "name": "ink",
@@ -46,11 +46,11 @@
     },
     {
       "name": "ink_subtle",
-      "value": "#5F6B7A"
+      "value": "#99182431"
     },
     {
       "name": "ink_faded",
-      "value": "#8A94A6"
+      "value": "#66182431"
     },
     {
       "name": "divider",
@@ -58,7 +58,7 @@
     },
     {
       "name": "bubble_out",
-      "value": "#D9FDD3"
+      "value": "#007DFF"
     },
     {
       "name": "bubble_in",
@@ -66,7 +66,7 @@
     },
     {
       "name": "bubble_out_text",
-      "value": "#182431"
+      "value": "#FFFFFF"
     },
     {
       "name": "bubble_in_text",
@@ -74,7 +74,7 @@
     },
     {
       "name": "read_tick",
-      "value": "#53BDEB"
+      "value": "#007DFF"
     },
     {
       "name": "delivered_tick",
@@ -82,7 +82,7 @@
     },
     {
       "name": "tab_inactive",
-      "value": "#667781"
+      "value": "#99182431"
     },
     {
       "name": "danger",
@@ -90,7 +90,11 @@
     },
     {
       "name": "media_placeholder",
-      "value": "#E4E6EB"
+      "value": "#EBEDF0"
+    },
+    {
+      "name": "connected",
+      "value": "#00CB87"
     }
   ]
 }

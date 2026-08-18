@@ -20,6 +20,16 @@
 /media
 /server/media
 
+# Live WhatsApp data + local verification artifacts (never commit)
+server-go/history.json
+server-go/history.json.seed-backup
+server-go/avatars/
+server-go/media/
+history.json
+emulator-screen.jpeg
+overhaul.jpeg
+relink-state.jpeg
+
 # Local toolchains / build caches / agent tooling
 /go
 /engine

@@ -21,9 +21,9 @@ Signal E2EE, SQLite session store, keepalive + auto-reconnect, media cache,
 ```
 
 > **Backend**: `server-go/` is the current backend — a wire-compatible port of
-> the original Rust `server/` (whatsapp-rust). The Go server is built and its
-> parity tests pass; the Rust server is kept as the known-good reference until
-> the Go server passes a live link + call test on a real account.
+> the original Rust `server/` (whatsapp-rust). It has been **live-validated
+> end-to-end** (QR link, full-history sync, live messaging, persistence across
+> restarts). The Rust `server/` is kept as the historical reference.
 
 ## How it works
 
@@ -77,7 +77,7 @@ handshake; the server bridges the app into it:
 
 | Feature | Status |
 |---|---|
-| QR pairing in-app (scan with phone) | ✅ |
+| QR pairing in-app (scan with phone) | ✅ live-validated |
 | Phone-number 8-char code pairing + country code | ✅ (`/pair-code` + on-screen code with country prefix) |
 | Provisioning QR (air-gapped / per-customer) | ✅ (`whatisit://provision` deep link + QR) |
 | Passkey (SHORTCAKE) linking | 🟡 server + app flow done; on-device WebAuthn needs SDK Credential Manager (manual-paste dev fallback) |
@@ -85,10 +85,61 @@ handshake; the server bridges the app into it:
 | Instant send, replies, reactions, mark-read | ✅ |
 | Delivery / read ticks | ✅ (server receipt events → WS) |
 | Media send + receive (image/video/audio/doc) | ✅ (cached server-side) |
+| Full chat history at link | ✅ when you pick "full history" at pairing — history sync is ingested + persisted |
+| History survives server restarts | ✅ auto-flush every 5s + flush on graceful shutdown (was previously lost) |
+| Chronological message ordering | ✅ time-sorted store (order independent of arrival) |
+| Older-history on-demand backfill | ✅ `/history/backfill` (WhatsApp Web's "scroll up" equivalent) |
 | Persistent session (no re-link) | ✅ SQLite + server keepalive |
+| Status tab (recent updates) | ✅ live status posts from `status@broadcast`; **ephemeral — not backfilled by history sync** |
+| Channels tab | ✅ subscribed channels + channel directory (find/follow/unfollow) |
+| Communities | ❌ not on the protocol surface |
 | WhatsApp-native voice calls | 🟡 meowcaller bridge implemented + compiles; **not yet live-validated** |
 | WhatsApp-native video calls | 🟡 H.264 via native `call_media` encode/decode; meowcaller video path unproven — test after voice |
-| Status / Channels / Communities tabs | ❌ honest empty states (not on the protocol surface) |
+
+## Sync & history (how it works now)
+
+- **History arrives from the phone, not the server.** WhatsApp only pushes a
+  `HistorySync` when a device is linked and you choose how much to include
+  (24h / 6 months / full). There is no server-side "fetch all history" API in
+  this whatsmeow build, so:
+  - to get the full backlog, **re-link and pick "full history"** at pairing;
+  - `server-go/history.json` is written from whatever the phone sent, and the
+    linked-device QR code is shown in-app whenever the server is unlinked.
+- **Ordering is chronological.** Messages are inserted time-sorted (deduped by
+  ID), so chat previews, threads and the chat list stay correct no matter what
+  order the phone delivers them in.
+- **Everything persists.** The store auto-flushes every 5s (and on shutdown),
+  so live messages survive a crash/restart — previously they were lost.
+- **Full history is served.** `/messages?chat=` returns the whole stored thread
+  by default (up to a 5,000-message cap), optional `limit=`.
+- **Older messages can be walked back on demand.** `POST /history/backfill
+  {chat, count}` asks the phone for messages older than the oldest one the
+  server holds (the same peer-data mechanism WhatsApp Web uses when scrolling
+  up). The reply arrives as a normal history sync and is ingested into the
+  store.
+- **Statuses are live-only.** Status posts arrive as ephemeral messages in
+  `status@broadcast`; the phone does not include them in history sync. The
+  Status tab shows posts that happen while the server is connected, plus any
+  `status@broadcast` messages present in a history sync (they are ingested as
+  the latest per contact).
+
+## Testing done vs. what the emulator cannot test
+
+**Done on the HarmonyOS emulator (+ a real WhatsApp account):**
+QR link with full-history sync (22 conversations / 4,154 messages ingested and
+served time-ordered), live messaging, persistence across server restarts,
+chats/channels/status rendering, backfill request handshake.
+
+**Cannot be validated on the emulator — needs a real device:**
+- WhatsApp-native voice/video calls end-to-end (meowcaller signalling, H.264
+  encode/decode, PiP, camera/mic capture) — the bridge compiles but is unproven.
+- On-device passkey WebAuthn (the SDK has no Credential Manager; the app falls
+  back to pasting a JSON assertion).
+- System push notifications while the app is backgrounded/killed.
+- Real hardware battery/keepalive behaviour and screen-off behaviour.
+- Large-scale media (multi-GB transfers, GPU-accelerated rendering of many
+  videos), and scrolling very long threads (10k+ messages).
+- SMS/phone-number 8-char pairing against a live SIM on a physical handset.
 
 ## Backends
 

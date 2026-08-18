@@ -497,9 +497,9 @@ export struct ChatThreadView {
       if (msg.replyTo.length > 0) {
         Text(msg.replyTo)
           .fontSize(12)
-          .fontColor($r('app.color.ink_subtle'))
+          .fontColor(msg.dir === 'out' ? Theme.DELIVERED_OUT : $r('app.color.ink_subtle'))
           .maxLines(2)
-          .backgroundColor($r('app.color.surface_subtle'))
+          .backgroundColor(msg.dir === 'out' ? '#26FFFFFF' : $r('app.color.surface_subtle'))
           .borderRadius(6)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
       }
@@ -510,7 +510,8 @@ export struct ChatThreadView {
       if (msg.reactions.length > 0) {
         Text(msg.reactions)
           .fontSize(13)
-          .backgroundColor($r('app.color.surface_subtle'))
+          .fontColor(msg.dir === 'out' ? '#FFFFFF' : $r('app.color.ink'))
+          .backgroundColor(msg.dir === 'out' ? '#26FFFFFF' : $r('app.color.surface_subtle'))
           .borderRadius(Theme.RADIUS_CHIP)
           .padding({ left: 8, right: 8, top: 2, bottom: 2 })
           .alignSelf(ItemAlign.End)
@@ -518,26 +519,26 @@ export struct ChatThreadView {
       Row({ space: 4 }) {
         Text(msg.time)
           .fontSize(11)
-          .fontColor($r('app.color.ink_subtle'))
+          .fontColor(msg.dir === 'out' ? Theme.DELIVERED_OUT : $r('app.color.ink_subtle'))
         if (msg.dir === 'out') {
           if (msg.status === 'read') {
             SymbolGlyph($r('sys.symbol.checkmark'))
               .fontSize(10)
-              .fontColor([Theme.READ])
+              .fontColor([Theme.READ_OUT])
             SymbolGlyph($r('sys.symbol.checkmark'))
               .fontSize(10)
-              .fontColor([Theme.READ])
+              .fontColor([Theme.READ_OUT])
           } else if (msg.status === 'delivered') {
             SymbolGlyph($r('sys.symbol.checkmark'))
               .fontSize(10)
-              .fontColor([Theme.DELIVERED])
+              .fontColor([Theme.DELIVERED_OUT])
             SymbolGlyph($r('sys.symbol.checkmark'))
               .fontSize(10)
-              .fontColor([Theme.DELIVERED])
+              .fontColor([Theme.DELIVERED_OUT])
           } else if (msg.status === 'sent') {
             SymbolGlyph($r('sys.symbol.checkmark'))
               .fontSize(10)
-              .fontColor([Theme.DELIVERED])
+              .fontColor([Theme.DELIVERED_OUT])
           }
         }
       }
@@ -545,6 +546,11 @@ export struct ChatThreadView {
     }
     .padding({ left: 12, right: 12, top: 8, bottom: 8 })
     .backgroundColor(msg.dir === 'out' ? $r('app.color.bubble_out') : $r('app.color.bubble_in'))
+    // Incoming bubbles get a hairline border so they lift off the page.
+    .border({
+      width: msg.dir === 'out' ? 0 : 0.5,
+      color: msg.dir === 'out' ? '#00000000' : $r('app.color.divider')
+    })
     // Tails: asymmetric corner on the last bubble of a sender run.
     .borderRadius(msg.dir === 'out'
       ? { topLeft: Theme.RADIUS_BUBBLE, topRight: groupEnd ? 4 : Theme.RADIUS_BUBBLE, bottomLeft: Theme.RADIUS_BUBBLE, bottomRight: Theme.RADIUS_BUBBLE }
@@ -584,7 +590,7 @@ export struct ChatThreadView {
       }
       Text(m.time)
         .fontSize(11)
-        .fontColor($r('app.color.ink_subtle'))
+        .fontColor(m.dir === 'out' ? Theme.DELIVERED_OUT : $r('app.color.ink_subtle'))
         .alignSelf(ItemAlign.End)
     }
     .padding(4)
@@ -610,21 +616,21 @@ export struct ChatThreadView {
     Row({ space: 8 }) {
       SymbolGlyph($r('sys.symbol.play'))
         .fontSize(18)
-        .fontColor([Theme.ACCENT])
+        .fontColor([m.dir === 'out' ? '#FFFFFF' : Theme.ACCENT])
       if (this.mediaPaths.has(m.id)) {
         Text('Play voice note')
           .fontSize(14)
-          .fontColor($r('app.color.ink'))
+          .fontColor(m.dir === 'out' ? $r('app.color.bubble_out_text') : $r('app.color.ink'))
       } else {
         Text('Loading…')
           .fontSize(14)
-          .fontColor($r('app.color.ink_subtle'))
+          .fontColor(m.dir === 'out' ? Theme.DELIVERED_OUT : $r('app.color.ink_subtle'))
       }
     }
     .width(180)
     .height(48)
     .padding({ left: 12, right: 12 })
-    .backgroundColor($r('app.color.surface_subtle'))
+    .backgroundColor(m.dir === 'out' ? '#26FFFFFF' : $r('app.color.surface_subtle'))
     .borderRadius(Theme.RADIUS_CHIP)
     .onClick(() => {
       this.playAudio(m);
@@ -689,7 +695,7 @@ export struct ChatThreadView {
 
         Stack() {
           Circle({ width: 34, height: 34 })
-            .fill($r('app.color.brand'))
+            .fill(Theme.avatarColor(this.chatName))
           if (this.chatName.length > 0) {
             Text(this.chatName.charAt(0).toUpperCase())
               .fontSize(14)
@@ -717,7 +723,7 @@ export struct ChatThreadView {
               .fontColor($r('app.color.ink'))
               .maxLines(1)
           }
-          Text('WhatsApp')
+          Text('End-to-end encrypted')
             .fontSize(11)
             .fontColor($r('app.color.ink_faded'))
         }
@@ -726,14 +732,14 @@ export struct ChatThreadView {
 
         SymbolGlyph($r('sys.symbol.phone'))
           .fontSize(20)
-          .fontColor([$r('app.color.ink')])
+          .fontColor([$r('app.color.brand')])
           .margin({ left: 8 })
           .onClick(() => {
             this.startWhatsAppCall(false);
           })
         SymbolGlyph($r('sys.symbol.video'))
           .fontSize(20)
-          .fontColor([$r('app.color.ink')])
+          .fontColor([$r('app.color.brand')])
           .margin({ left: 16, right: 8 })
           .onClick(() => {
             this.startWhatsAppCall(true);

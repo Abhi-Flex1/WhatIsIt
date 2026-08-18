@@ -5,6 +5,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -35,6 +36,14 @@ func (wc *WAClient) onHistorySync(e *events.HistorySync) {
 			web := hsMsg.GetMessage()
 			if web == nil {
 				continue
+			}
+			// Status posts ride on the status@broadcast chat; surface the
+			// latest per contact in the Status tab (history syncs include
+			// them on some phone setups even though they are ephemeral).
+			if chat == types.StatusBroadcastJID.String() {
+				if entry := statusFromWebMessage(wc, web); entry != nil {
+					wc.state.Store.AddStatusIfNewer(*entry)
+				}
 			}
 			if msg := parseWebMessage(chat, web); msg != nil {
 				wc.state.Store.UpsertMessage(*msg)
@@ -99,4 +108,35 @@ func extractWebFields(m *waE2E.Message) (text, replyTo string, media *MediaRef) 
 		return md.Caption, "", md
 	}
 	return "", "", nil
+}
+
+// statusFromWebMessage builds a StatusEntry from a status@broadcast message in
+// a history sync. Self-posts and messages without a sender are skipped.
+func statusFromWebMessage(wc *WAClient, web *waWeb.WebMessageInfo) *StatusEntry {
+	key := web.GetKey()
+	msg := web.GetMessage()
+	if key == nil || msg == nil || key.GetFromMe() {
+		return nil
+	}
+	sender := key.GetParticipant()
+	if sender == "" {
+		return nil
+	}
+	text, _, media := extractWebFields(msg)
+	kind := "text"
+	if media != nil {
+		kind = media.Kind
+	}
+	name := sender
+	if jid, err := types.ParseJID(sender); err == nil {
+		name = wc.contactName(jid)
+	}
+	return &StatusEntry{
+		Sender: sender,
+		Name:   name,
+		Text:   text,
+		Kind:   kind,
+		Time:   int64(web.GetMessageTimestamp()) * 1000,
+		Media:  media,
+	}
 }

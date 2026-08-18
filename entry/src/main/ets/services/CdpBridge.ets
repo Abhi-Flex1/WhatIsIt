@@ -83,7 +83,7 @@ export class MediaMessage {
 
 /** Server-pushed events (from /ws). */
 export interface BackendEvent {
-  type: string; // qr | linked | message | receipt | chats | logged_out | status | passkey_request | passkey_confirmation | passkey_error
+  type: string; // qr | linked | message | receipt | chats | logged_out | status | passkey_request | passkey_confirmation | passkey_error | incoming_call | call_state
   qr?: string;
   phone?: string;
   chat?: string;
@@ -91,6 +91,10 @@ export interface BackendEvent {
   options?: string; // passkey_request: PublicKeyCredentialRequestOptions JSON
   code?: string; // passkey_confirmation: verification code to show
   error?: string; // passkey_error: human-readable reason
+  callId?: string; // incoming_call / call_state: the active call
+  from?: string; // incoming_call: caller JID
+  video?: boolean; // incoming_call: whether the call includes video
+  state?: string; // call_state: calling | connecting | ended:<reason>
 }
 
 /** Backend JSON response shape (parsed explicitly into typed objects). */
@@ -196,6 +200,14 @@ export class CdpBridge {
   /** Register a listener for live server events (QR, linked, message, ...). */
   addEventListener(listener: EventListener): void {
     this.listeners.push(listener);
+  }
+
+  /** Remove a previously-registered listener. */
+  removeEventListener(listener: EventListener): void {
+    const i = this.listeners.indexOf(listener);
+    if (i >= 0) {
+      this.listeners.splice(i, 1);
+    }
   }
 
   private emit(evt: BackendEvent): void {
@@ -1176,12 +1188,37 @@ export class CdpBridge {
     return '';
   }
 
+  /** Contacts with a recent status update (from the backend /status-list). */
   async scrapeStatus(): Promise<ChatSummary[]> {
-    return [];
+    const resp = await this.httpJson('GET', '/status-list');
+    const out: ChatSummary[] = [];
+    if (resp !== null) {
+      const arr = resp['statuses'];
+      if (arr !== undefined && arr !== null) {
+        const items = arr as object[];
+        for (const item of items) {
+          const d = item as Record<string, Object>;
+          const c = new ChatSummary();
+          c.id = typeof d['sender'] === 'string' ? (d['sender'] as string) : '';
+          c.name = typeof d['name'] === 'string' ? (d['name'] as string) : '';
+          if (c.name.length === 0) {
+            c.name = c.id;
+          }
+          const kind = typeof d['kind'] === 'string' ? (d['kind'] as string) : 'text';
+          const text = typeof d['text'] === 'string' ? (d['text'] as string) : '';
+          c.preview = text.length > 0 ? text : (kind === 'text' ? 'Status update' : '📎 ' + kind);
+          const t = d['time'];
+          c.time = typeof t === 'number' ? this.formatTime(t as number) : '';
+          c.avatarUrl = this.avatarUrlFor(c.id);
+          out.push(c);
+        }
+      }
+    }
+    return out;
   }
 
   async openStatusTab(): Promise<ChatSummary[]> {
-    return [];
+    return this.scrapeStatus();
   }
 
   /** Fetch the followed channels list from the backend (with cache). */

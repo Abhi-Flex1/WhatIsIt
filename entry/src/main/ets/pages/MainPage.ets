@@ -16,6 +16,8 @@ import { ChannelDirectoryView } from './ChannelDirectoryView';
 import { StatusComposerView } from './StatusComposerView';
 import { ContactPickerService } from '../services/ContactPickerService';
 import { ServerConfig } from '../services/ServerConfig';
+import { callService } from '../services/CallService';
+import { CallSurfaceView } from './CallSurfaceView';
 
 const TAG = 'MainPage';
 const DOMAIN = 0x0000;
@@ -45,6 +47,13 @@ struct MainPage {
   @State securityBlocked: boolean = false;
   @State showProvisionQR: boolean = false;
   @State provisionUrl: string = '';
+  @State incomingCallId: string = '';
+  @State incomingFrom: string = '';
+  @State incomingVideo: boolean = false;
+  @State activeCallId: string = '';
+  @State activeCallName: string = '';
+  @State activeCallVideo: boolean = false;
+  @State activeCallSurface: boolean = false;
   private store: preferences.Preferences | null = null;
   private qrTimer: number | null = null;
 
@@ -110,6 +119,19 @@ struct MainPage {
     cdpBridge.addEventListener((evt: BackendEvent) => {
       if (evt.type === 'qr' && evt.qr !== undefined) {
         this.qr = evt.qr;
+      } else if (evt.type === 'status') {
+        // Sent by the server on every WS (re)connect. A server that reports
+        // not-linked means the session is gone (server reset/logout/relink),
+        // so drop back to the connect screen and follow the fresh QR.
+        if (evt.linked === true) {
+          this.qr = '';
+          this.view = 'chats';
+          this.stopQrPoll();
+        } else if (evt.qr !== undefined && evt.qr.length > 0) {
+          this.qr = evt.qr;
+          this.view = 'connect';
+          this.startQrPoll();
+        }
       } else if (evt.type === 'linked') {
         this.qr = '';
         this.view = 'chats';
@@ -122,6 +144,10 @@ struct MainPage {
       } else if (evt.type === 'pair_code' && evt.code !== undefined) {
         this.pairCodeText = evt.code;
         this.pairBusy = false;
+      } else if (evt.type === 'incoming_call') {
+        this.onIncomingCall(evt);
+      } else if (evt.type === 'call_state') {
+        this.onCallState(evt);
       }
     });
     // Passkey (SHORTCAKE) verification during linking.
@@ -355,6 +381,80 @@ struct MainPage {
     this.animatedSetView('chats');
   }
 
+  /** WhatsApp-native call arrives (from the server's incoming_call event). */
+  private onIncomingCall(evt: BackendEvent): void {
+    // Already in a call — ignore further incoming calls.
+    if (this.activeCallSurface) {
+      return;
+    }
+    const callId = evt.callId !== undefined ? evt.callId : '';
+    if (callId.length === 0) {
+      return;
+    }
+    this.incomingCallId = callId;
+    this.incomingFrom = evt.from !== undefined ? evt.from : '';
+    this.incomingVideo = evt.video === true;
+    hilog.info(DOMAIN, TAG, 'incoming call %{public}s from %{public}s video=%{public}s',
+      callId, this.incomingFrom, this.incomingVideo);
+  }
+
+  /** Call lifecycle pushes: dismiss the prompt / close the surface on end. */
+  private onCallState(evt: BackendEvent): void {
+    const callId = evt.callId !== undefined ? evt.callId : '';
+    const state = evt.state !== undefined ? evt.state : '';
+    if (callId.length === 0) {
+      return;
+    }
+    if (state.startsWith('ended') || state === 'rejected' || state === 'missed') {
+      if (this.incomingCallId === callId) {
+        this.incomingCallId = '';
+        this.incomingFrom = '';
+      }
+      if (this.activeCallId === callId) {
+        this.activeCallId = '';
+        this.activeCallSurface = false;
+      }
+    }
+  }
+
+  /** Answer the ringing call: open the native call surface. */
+  private async acceptIncomingCall(): Promise<void> {
+    const callId = this.incomingCallId;
+    const from = this.incomingFrom;
+    const video = this.incomingVideo;
+    if (callId.length === 0) {
+      return;
+    }
+    const ok = await callService.acceptCall(callId, video);
+    this.incomingCallId = '';
+    this.incomingFrom = '';
+    if (!ok) {
+      hilog.warn(DOMAIN, TAG, 'accept call %{public}s failed', callId);
+      return;
+    }
+    this.activeCallId = callId;
+    this.activeCallName = from;
+    this.activeCallVideo = video;
+    this.activeCallSurface = true;
+  }
+
+  /** Decline the ringing call (the caller hears the busy tone). */
+  private async declineIncomingCall(): Promise<void> {
+    const callId = this.incomingCallId;
+    this.incomingCallId = '';
+    this.incomingFrom = '';
+    if (callId.length > 0) {
+      await callService.rejectCall(callId);
+    }
+  }
+
+  /** The active call surface's end button → tear down everything. */
+  private closeActiveCallSurface(): void {
+    callService.endCall();
+    this.activeCallId = '';
+    this.activeCallSurface = false;
+  }
+
   /** Build a provisioning deep-link URL for the current backend. */
   private buildProvisionUrl(): string {
     const host = ServerConfig.BACKEND_HOST;
@@ -452,14 +552,14 @@ struct MainPage {
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.bg_page'))
       } else if (this.view === 'connect') {
         Scroll() {
           Column({ space: 16 }) {
           Blank()
           Text('Link your WhatsApp')
-            .fontSize(22)
-            .fontWeight(FontWeight.Bold)
+            .fontSize(24)
+            .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.ink'))
           Text('Open WhatsApp on your phone, tap Linked Devices > Link a Device, and scan this QR code.')
             .fontSize(14)
@@ -527,8 +627,9 @@ struct MainPage {
                   .width(72)
                   .height(46)
                   .type(InputType.Number)
-                  .fontColor('#000000')
-                  .placeholderColor('#666666')
+                  .fontColor($r('app.color.ink'))
+                  .placeholderColor($r('app.color.ink_faded'))
+                  .backgroundColor($r('app.color.surface_subtle'))
                   .onChange((v: string) => {
                     this.phoneCountry = v.replace(/[^0-9+]/g, '');
                   })
@@ -537,8 +638,9 @@ struct MainPage {
                   .layoutWeight(1)
                   .height(46)
                   .type(InputType.PhoneNumber)
-                  .fontColor('#000000')
-                  .placeholderColor('#666666')
+                  .fontColor($r('app.color.ink'))
+                  .placeholderColor($r('app.color.ink_faded'))
+                  .backgroundColor($r('app.color.surface_subtle'))
                   .onChange((v: string) => {
                     this.phoneNumber = v;
                   })
@@ -716,7 +818,7 @@ struct MainPage {
               .border({ width: 1, color: '#DDDDDD' })
               Text('URL: ' + this.provisionUrl)
                 .fontSize(10)
-                .fontColor('#888888')
+                .fontColor($r('app.color.ink_faded'))
                 .textAlign(TextAlign.Center)
                 .padding({ left: 12, right: 12 })
             }
@@ -806,6 +908,75 @@ struct MainPage {
           .width('100%')
           .height('100%')
           .transition(this.threadTransition())
+      }
+
+      // Ringing call → full-screen accept/decline prompt.
+      if (this.incomingCallId.length > 0) {
+        Column({ space: 20 }) {
+          Stack() {
+            Circle({ width: 84, height: 84 })
+              .fill($r('app.color.brand'))
+            Text(cdpBridge.displayName(this.incomingFrom).charAt(0).toUpperCase())
+              .fontSize(36)
+              .fontColor('#FFFFFF')
+          }
+          Text(cdpBridge.displayName(this.incomingFrom))
+            .fontSize(22)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+            .maxLines(1)
+          Text(this.incomingVideo ? 'Video call from this contact' : 'Voice call from this contact')
+            .fontSize(14)
+            .fontColor('#E4E6EB')
+          Row({ space: 48 }) {
+            Column({ space: 6 }) {
+              SymbolGlyph($r('sys.symbol.phone'))
+                .fontSize(26)
+                .fontColor(['#FFFFFF'])
+                .backgroundColor('#EA4335')
+                .borderRadius(28)
+                .padding(14)
+              Text('Decline')
+                .fontSize(12)
+                .fontColor('#E4E6EB')
+            }
+            .onClick(() => {
+              this.declineIncomingCall();
+            })
+            Column({ space: 6 }) {
+              SymbolGlyph(this.incomingVideo ? $r('sys.symbol.video') : $r('sys.symbol.phone'))
+                .fontSize(26)
+                .fontColor(['#FFFFFF'])
+                .backgroundColor('#007DFF')
+                .borderRadius(28)
+                .padding(14)
+              Text('Accept')
+                .fontSize(12)
+                .fontColor('#E4E6EB')
+            }
+            .onClick(() => {
+              this.acceptIncomingCall();
+            })
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#111B21')
+      }
+
+      // Active call (accepted from the prompt): the native call surface.
+      if (this.activeCallSurface) {
+        CallSurfaceView({
+          chatName: this.activeCallName,
+          callId: this.activeCallId,
+          isVideo: this.activeCallVideo,
+          onClose: () => {
+            this.closeActiveCallSurface();
+          }
+        })
+          .width('100%')
+          .height('100%')
       }
     }
     .width('100%')
