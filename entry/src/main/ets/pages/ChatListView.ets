@@ -198,7 +198,7 @@ export struct ChatListView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill($r('app.color.brand'))
+          .fill(Theme.avatarColor(status.id))
         Text(status.name.charAt(0).toUpperCase())
           .fontSize(20)
           .fontColor($r('app.color.brand_text'))
@@ -292,7 +292,7 @@ export struct ChatListView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill($r('app.color.brand'))
+          .fill(Theme.avatarColor(channel.id))
         Text(channel.name.charAt(0).toUpperCase())
           .fontSize(20)
           .fontColor($r('app.color.brand_text'))
@@ -345,7 +345,7 @@ export struct ChatListView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill(call.missed ? $r('app.color.danger') : $r('app.color.brand'))
+          .fill(call.missed ? $r('app.color.danger') : Theme.avatarColor(call.peer))
         SymbolGlyph(call.dir === 'out' ? $r('sys.symbol.arrow_up_right') : $r('sys.symbol.arrow_down_left'))
           .fontSize(20)
           .fontColor([$r('app.color.brand_text')])
@@ -431,7 +431,7 @@ export struct ChatListView {
     if (this.tab === 'communities') {
       return 'Communities';
     }
-    return 'WhatIsIt';
+    return 'Messages';
   }
 
   private markAvatarFailed(id: string): void {
@@ -446,7 +446,7 @@ export struct ChatListView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill($r('app.color.brand'))
+          .fill(Theme.avatarColor(chat.id))
         Text(chat.name.charAt(0).toUpperCase())
           .fontSize(20)
           .fontColor($r('app.color.brand_text'))
@@ -562,7 +562,7 @@ export struct ChatListView {
           Row() {
             Text(this.tabTitle())
               .fontSize(Theme.TYPE_LARGE_TITLE)
-              .fontWeight(FontWeight.Bold)
+              .fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.ink'))
               .layoutWeight(1)
             if (this.tab === 'status') {

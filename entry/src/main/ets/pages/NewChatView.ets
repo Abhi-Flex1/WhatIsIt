@@ -78,11 +78,11 @@ export struct NewChatView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill($r('app.color.brand_soft'))
+          .fill(Theme.avatarColor(c.name))
         Text(ContactPickerService.initials(c.name))
           .fontSize(17)
           .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.brand'))
+          .fontColor($r('app.color.brand_text'))
       }
       .width(Theme.AVATAR_SIZE)
       .height(Theme.AVATAR_SIZE)

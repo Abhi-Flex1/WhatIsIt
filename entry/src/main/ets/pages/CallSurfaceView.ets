@@ -13,12 +13,13 @@ import { callService } from '../services/CallService';
 import { callAudio } from '../services/CallAudio';
 import { callPiP } from '../services/CallPiP';
 import { backgroundAudioAgent } from '../services/BackgroundAudioAgent';
+import { cdpBridge, BackendEvent } from '../services/CdpBridge';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const TAG = 'CallSurfaceView';
 const DOMAIN = 0x0000;
-const WHATSAPP_GREEN = '#00A884';
+const WHATSAPP_GREEN = '#007DFF';
 
 @Component
 export struct CallSurfaceView {
@@ -29,8 +30,13 @@ export struct CallSurfaceView {
   @State muted: boolean = false;
   @State cameraOn: boolean = true;
   @State callState: string = 'active';
+  @State elapsed: string = '0:00';
   private remoteXComponentController: XComponentController = new XComponentController();
   private localXComponentController: XComponentController = new XComponentController();
+  private elapsedTimer: number | null = null;
+  private connectedAt: number = 0;
+  private closing: boolean = false;
+  private eventListener: ((evt: BackendEvent) => void) | null = null;
 
   aboutToAppear(): void {
     hilog.info(DOMAIN, TAG, 'call surface open: %{public}s (video=%{public}s)', this.callId, this.isVideo);
@@ -41,10 +47,8 @@ export struct CallSurfaceView {
       backgroundAudioAgent.init(uiCtx);
       backgroundAudioAgent.startContinuousVoipTask();
     }
-    // Attach the remote decoder surface: the XComponent's surface id feeds the
-    // native decoder, which renders peer video into it.
     if (this.isVideo) {
-      this.startVideoPipeline();
+      // PiP hand-off setup (video pipeline starts from the XComponent onLoad).
       this.initPiP();
     }
     // Start audio pipeline (mic → WS → backend, peer audio ← WS → speaker).
@@ -52,12 +56,24 @@ export struct CallSurfaceView {
     callAudio.start().catch(() => {
       hilog.warn(DOMAIN, TAG, 'call audio start failed');
     });
+    // Live call-state events (call_state from the server → label + auto-close).
+    const listener = (evt: BackendEvent) => {
+      this.onServerEvent(evt);
+    };
+    this.eventListener = listener;
+    cdpBridge.addEventListener(listener);
+    this.startElapsedTimer();
   }
 
   aboutToDisappear(): void {
     callAudio.stop();
     callPiP.stopPiP();
     backgroundAudioAgent.stopContinuousVoipTask();
+    this.stopElapsedTimer();
+    if (this.eventListener !== null) {
+      cdpBridge.removeEventListener(this.eventListener);
+      this.eventListener = null;
+    }
   }
 
   /** App backgrounded (Home / app switch) → transition video into PiP. */
@@ -67,14 +83,60 @@ export struct CallSurfaceView {
     }
   }
 
+  /** Remote XComponent mounted → the decoder surface id is available now. */
   private startVideoPipeline(): void {
-    // The remote XComponent surface id is available after the component mounts.
     const surfaceId = this.remoteXComponentController.getXComponentSurfaceId();
     if (surfaceId.length === 0) {
       hilog.warn(DOMAIN, TAG, 'remote XComponent surface not ready');
       return;
     }
     callService.startVideo(Number(surfaceId));
+  }
+
+  /** Server call_state events → status label + auto-close when the peer ends. */
+  private onServerEvent(evt: BackendEvent): void {
+    if (evt.type !== 'call_state') {
+      return;
+    }
+    const state = evt.state !== undefined ? evt.state : '';
+    if (state.startsWith('ended') || state === 'rejected' || state === 'missed') {
+      if (!this.closing) {
+        this.end();
+      }
+      return;
+    }
+    this.callState = state === 'calling' ? 'calling' : (state === 'connecting' ? 'connecting' : 'active');
+  }
+
+  private startElapsedTimer(): void {
+    this.stopElapsedTimer();
+    this.connectedAt = Date.now();
+    this.elapsed = '0:00';
+    this.elapsedTimer = setInterval(() => {
+      const s = Math.floor((Date.now() - this.connectedAt) / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      this.elapsed = m + ':' + (sec < 10 ? '0' : '') + sec;
+    }, 1000);
+  }
+
+  private stopElapsedTimer(): void {
+    if (this.elapsedTimer !== null) {
+      clearInterval(this.elapsedTimer);
+      this.elapsedTimer = null;
+    }
+  }
+
+  /** Status line under the peer's name: calling/connecting label or duration. */
+  private statusSubtitle(): string {
+    const kind = this.isVideo ? 'video' : 'voice';
+    if (this.callState === 'calling') {
+      return 'Calling… · ' + kind;
+    }
+    if (this.callState === 'connecting') {
+      return 'Connecting… · ' + kind;
+    }
+    return this.elapsed + ' · ' + kind;
   }
 
   private initPiP(): void {
@@ -109,17 +171,27 @@ export struct CallSurfaceView {
   }
 
   private end(): void {
+    if (this.closing) {
+      return;
+    }
+    this.closing = true;
     callService.endCall();
     this.onClose();
   }
 
   build() {
     Stack() {
-      // Remote video (decoder surface).
+      // Remote video (decoder surface). The XComponent's surface id is only
+      // available once the surface loads, so the decoder pipeline starts there.
       XComponent({ id: 'remote', type: 'surface', controller: this.remoteXComponentController })
         .width('100%')
         .height('100%')
         .backgroundColor('#111B21')
+        .onLoad(() => {
+          if (this.isVideo) {
+            this.startVideoPipeline();
+          }
+        })
 
       // Local camera preview (encoder surface) — small PiP-style overlay.
       if (this.isVideo && this.cameraOn) {
@@ -145,7 +217,7 @@ export struct CallSurfaceView {
               .fontSize(16)
               .fontWeight(FontWeight.Bold)
               .fontColor('#FFFFFF')
-            Text(this.callState + (this.isVideo ? ' · video' : ' · voice'))
+            Text(this.statusSubtitle())
               .fontSize(11)
               .fontColor('#E4E6EB')
           }

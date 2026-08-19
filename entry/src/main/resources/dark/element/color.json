@@ -6,15 +6,15 @@
     },
     {
       "name": "brand",
-      "value": "#00A884"
+      "value": "#006CDE"
     },
     {
       "name": "brand_pressed",
-      "value": "#02BFA0"
+      "value": "#3D8DFF"
     },
     {
       "name": "brand_soft",
-      "value": "#26332E"
+      "value": "#122B4A"
     },
     {
       "name": "brand_text",
@@ -26,31 +26,31 @@
     },
     {
       "name": "bg_chat",
-      "value": "#0B141A"
+      "value": "#121214"
     },
     {
       "name": "surface",
-      "value": "#1F2C34"
+      "value": "#1A1A1A"
     },
     {
       "name": "surface_pressed",
-      "value": "#29353A"
+      "value": "#242427"
     },
     {
       "name": "surface_subtle",
-      "value": "#232D35"
+      "value": "#242427"
     },
     {
       "name": "ink",
-      "value": "#E9EDEF"
+      "value": "#E5E5E5"
     },
     {
       "name": "ink_subtle",
-      "value": "#99AEB5"
+      "value": "#99FFFFFF"
     },
     {
       "name": "ink_faded",
-      "value": "#8696A0"
+      "value": "#66FFFFFF"
     },
     {
       "name": "divider",
@@ -58,23 +58,23 @@
     },
     {
       "name": "bubble_out",
-      "value": "#005C4B"
+      "value": "#006CDE"
     },
     {
       "name": "bubble_in",
-      "value": "#1F2C34"
+      "value": "#1E1E20"
     },
     {
       "name": "bubble_out_text",
-      "value": "#E9EDEF"
+      "value": "#FFFFFF"
     },
     {
       "name": "bubble_in_text",
-      "value": "#E9EDEF"
+      "value": "#E5E5E5"
     },
     {
       "name": "read_tick",
-      "value": "#53BDEB"
+      "value": "#3F97E9"
     },
     {
       "name": "delivered_tick",
@@ -82,15 +82,19 @@
     },
     {
       "name": "tab_inactive",
-      "value": "#99AEB5"
+      "value": "#99FFFFFF"
     },
     {
       "name": "danger",
-      "value": "#FA2A2D"
+      "value": "#E64548"
     },
     {
       "name": "media_placeholder",
-      "value": "#2A3942"
+      "value": "#2A2A2E"
+    },
+    {
+      "name": "connected",
+      "value": "#00B377"
     }
   ]
 }

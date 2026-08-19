@@ -8,6 +8,7 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
@@ -171,5 +172,63 @@ func TestHistorySyncEmptyChatID(t *testing.T) {
 	}
 	if chats[0].Name != "Bob" {
 		t.Errorf("chat name = %q, want Bob", chats[0].Name)
+	}
+}
+
+// TestHistorySyncStatuses: status@broadcast messages in a history sync are
+// surfaced as the latest status per sender (newest wins, self-posts skipped).
+func TestHistorySyncStatuses(t *testing.T) {
+	state, wc := testHistoryState(t)
+	statusChat := types.StatusBroadcastJID.String()
+	ev := &events.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType: waHistorySync.HistorySync_RECENT.Enum(),
+		Conversations: []*waHistorySync.Conversation{
+			{
+				ID: proto.String(statusChat),
+				Messages: []*waHistorySync.HistorySyncMsg{
+					{Message: &waWeb.WebMessageInfo{
+						Key: &waCommon.MessageKey{
+							ID:          proto.String("S1"),
+							FromMe:      proto.Bool(false),
+							Participant: proto.String("393511122233@s.whatsapp.net"),
+						},
+						Message:         &waE2E.Message{Conversation: proto.String("old status")},
+						MessageTimestamp: proto.Uint64(1700000000),
+					}},
+					{Message: &waWeb.WebMessageInfo{
+						Key: &waCommon.MessageKey{
+							ID:          proto.String("S2"),
+							FromMe:      proto.Bool(false),
+							Participant: proto.String("393511122233@s.whatsapp.net"),
+						},
+						Message:         &waE2E.Message{Conversation: proto.String("new status")},
+						MessageTimestamp: proto.Uint64(1700000060),
+					}},
+					{Message: &waWeb.WebMessageInfo{
+						Key: &waCommon.MessageKey{
+							ID:          proto.String("SELF"),
+							FromMe:      proto.Bool(true),
+							Participant: proto.String("393511122233@s.whatsapp.net"),
+						},
+						Message:         &waE2E.Message{Conversation: proto.String("self post")},
+						MessageTimestamp: proto.Uint64(1700000100),
+					}},
+				},
+			},
+		},
+	}}
+	wc.onHistorySync(ev)
+	sts := state.Store.Statuses()
+	if len(sts) != 1 {
+		t.Fatalf("statuses = %d, want 1 (latest per sender, self skipped)", len(sts))
+	}
+	if sts[0].Text != "new status" {
+		t.Errorf("status text = %q, want 'new status' (newest wins)", sts[0].Text)
+	}
+	if sts[0].Sender != "393511122233@s.whatsapp.net" {
+		t.Errorf("status sender = %q", sts[0].Sender)
+	}
+	if sts[0].Time != 1700000060000 {
+		t.Errorf("status time = %d, want 1700000060000", sts[0].Time)
 	}
 }

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.mau.fi/whatsmeow/types"
@@ -40,6 +42,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/pair", s.guard(s.pair))
 	s.mux.HandleFunc("/pair-code", s.guard(s.pairCode))
 	s.mux.HandleFunc("/chats", s.guard(s.chats))
+	s.mux.HandleFunc("/status-list", s.guard(s.statusList))
 	s.mux.HandleFunc("/calls", s.guard(s.callHistory))
 	s.mux.HandleFunc("/channels", s.guard(s.channels))
 	s.mux.HandleFunc("/avatar", s.guard(s.avatar))
@@ -47,6 +50,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/channel/follow", s.guard(s.followChannel))
 	s.mux.HandleFunc("/channel/unfollow", s.guard(s.unfollowChannel))
 	s.mux.HandleFunc("/messages", s.guard(s.messages))
+	s.mux.HandleFunc("/history/backfill", s.guard(s.historyBackfill))
 	s.mux.HandleFunc("/send", s.guard(s.send))
 	s.mux.HandleFunc("/send-media", s.guard(s.sendMedia))
 	s.mux.HandleFunc("/read", s.guard(s.read))
@@ -169,6 +173,14 @@ func (s *Server) chats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"chats": s.state.Store.Chats()})
 }
 
+func (s *Server) statusList(w http.ResponseWriter, r *http.Request) {
+	if !s.state.IsLinked() {
+		s.notLinked(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"statuses": s.state.Store.Statuses()})
+}
+
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	if !s.state.IsLinked() {
 		s.notLinked(w)
@@ -179,7 +191,55 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "chat required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": s.state.Store.Messages(chat, 200)})
+	limit := maxMessages
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= maxMessages {
+			limit = n
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": s.state.Store.Messages(chat, limit)})
+}
+
+type backfillBody struct {
+	Chat  string `json:"chat"`
+	Count *int   `json:"count"`
+}
+
+// historyBackfill asks the linked phone for older messages in a chat (on-demand
+// history sync), so a thread can be walked all the way back even when the
+// initial history sync never delivered. Response arrives asynchronously as a
+// HistorySync event which onHistorySync ingests.
+func (s *Server) historyBackfill(w http.ResponseWriter, r *http.Request) {
+	if !s.state.IsLinked() {
+		s.notLinked(w)
+		return
+	}
+	if !s.waOr500(w) {
+		return
+	}
+	var body backfillBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request"})
+		return
+	}
+	if body.Chat == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "chat required"})
+		return
+	}
+	jid, err := types.ParseJID(body.Chat)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad jid: " + err.Error()})
+		return
+	}
+	count := 50
+	if body.Count != nil {
+		count = *body.Count
+	}
+	if err := s.wa.RequestHistoryBackfill(r.Context(), jid, count); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 type sendBody struct {
@@ -306,6 +366,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	s.state.SetPhone("")
 	s.state.Store.SetPhone("")
 	s.state.Bus.Publish(EvLoggedOut())
+	// whatsmeow's Logout doesn't emit a LoggedOut event, so restart the QR
+	// pairing stream here (background ctx: the request context dies on return).
+	if err := s.wa.StartPairing(context.Background()); err != nil {
+		log.Printf("restart pairing after logout: %v", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

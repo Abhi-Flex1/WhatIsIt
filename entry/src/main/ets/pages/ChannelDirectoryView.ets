@@ -50,7 +50,7 @@ export struct ChannelDirectoryView {
     Row({ space: 12 }) {
       Stack() {
         Circle({ width: Theme.AVATAR_SIZE, height: Theme.AVATAR_SIZE })
-          .fill($r('app.color.brand'))
+          .fill(Theme.avatarColor(channel.id))
         Text(channel.name.charAt(0).toUpperCase())
           .fontSize(20)
           .fontColor($r('app.color.brand_text'))

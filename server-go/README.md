@@ -20,6 +20,8 @@ go test ./...
 
 ```sh
 WHATSAPP_TOKEN=secret PORT=18770 go run ./cmd/server
+# clear the persisted chat store before starting (fresh pairing / demo cleanup):
+/tmp/whatisit-server -reset
 ```
 
 | Env | Default | Meaning |
@@ -32,13 +34,33 @@ WHATSAPP_TOKEN=secret PORT=18770 go run ./cmd/server
 
 ## Wire contract (unchanged from the Rust server)
 
-- **HTTP**: `/status`, `/pair`, `/pair-code`, `/chats`, `/messages?chat=`,
-  `/send`, `/send-media`, `/read`, `/react`, `/logout`, `/media/{id}/{kind}`,
-  `/call*`, `/passkey/*`, `/ws`.
+- **HTTP**: `/status`, `/pair`, `/pair-code`, `/chats`, `/messages?chat=&limit=`,
+  `/status-list`, `/calls`, `/channels`, `/channel/follow`, `/channel/unfollow`,
+  `/status-update`, `/history/backfill`, `/send`, `/send-media`, `/read`,
+  `/react`, `/logout`, `/media/{id}/{kind}`, `/call*`, `/passkey/*`, `/ws`.
 - **WS text events**: `qr`, `linked`, `message`, `receipt`, `chats`,
-  `logged_out`, `incoming_call` (callId/from/video), `call_state`,
-  `pair_code`, `passkey_request`, `passkey_confirmation`, `passkey_error`.
+  `logged_out`, `status` (sent on connect — carry `linked`/`phone`/`qr`),
+  `incoming_call` (callId/from/video), `call_state`, `pair_code`,
+  `passkey_request`, `passkey_confirmation`, `passkey_error`.
 - **WS binary media**: `[1][pcm s16le]` (audio), `[2][keyframe][h264 AU]` (video).
+
+## Sync & store behaviour
+
+- Messages are stored **time-ordered** (deduped by ID) regardless of arrival
+  order; chat previews/threads/the chat list all use the newest-by-time message.
+- The store **auto-flushes every 5s** and on graceful shutdown (`SIGINT`/`SIGTERM`),
+  so live messages survive restarts. `Flush` also runs after every history sync.
+- `/messages` serves the whole stored thread by default (cap 5,000 messages);
+  pass `limit=` for a window.
+- `POST /history/backfill {chat, count}` requests older messages from the
+  phone's primary device via whatsmeow's on-demand history sync
+  (`BuildHistorySyncRequest` + `SendPeerMessage`); the response arrives as a
+  normal `events.HistorySync` and is ingested into the store.
+- Status posts (`status@broadcast` messages, live or inside a history sync) are
+  recorded as the latest per contact and served by `/status-list`.
+- `-reset` deletes `history.json` on startup (used to clear demo/seed data or
+  start a fresh pairing cleanly). WhatsApp history is only ever written by the
+  phone: link the device and choose "full history" to backfill a backlog.
 
 ## Calls (meowcaller)
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -50,7 +51,7 @@ type conversation struct {
 
 // CallRecord is one entry in the WhatsApp call history (audio/video, in/out).
 type CallRecord struct {
-	ID     string `json:"id"` // whatsmeow call id (unique)
+	ID     string `json:"id"`   // whatsmeow call id (unique)
 	Peer   string `json:"peer"` // JID
 	Dir    string `json:"dir"`  // "in" | "out"
 	Video  bool   `json:"video"`
@@ -58,11 +59,24 @@ type CallRecord struct {
 	Time   int64  `json:"time"` // unix millis
 }
 
+// StatusEntry is one contact's most recent WhatsApp status update. WhatsApp
+// statuses arrive as messages in the status@broadcast chat; we record the
+// latest per sender so the Status tab can list "Recent updates".
+type StatusEntry struct {
+	Sender string    `json:"sender"` // JID of the poster
+	Name   string    `json:"name"`   // display name for the row
+	Text   string    `json:"text"`
+	Kind   string    `json:"kind"` // text | image | video | voice | ...
+	Time   int64     `json:"time"` // unix millis
+	Media  *MediaRef `json:"media,omitempty"`
+}
+
 type snapshot struct {
-	Chats map[string]*conversation `json:"chats"`
-	Names map[string]string        `json:"names"`
-	Phone string                   `json:"phone"`
-	Calls []CallRecord             `json:"calls"`
+	Chats    map[string]*conversation `json:"chats"`
+	Names    map[string]string        `json:"names"`
+	Phone    string                   `json:"phone"`
+	Calls    []CallRecord             `json:"calls"`
+	Statuses []StatusEntry            `json:"statuses"`
 }
 
 // HistoryStore is the in-memory chat/message store, persisted as history.json.
@@ -70,20 +84,28 @@ type HistoryStore struct {
 	mu           sync.Mutex
 	chats        map[string]*conversation
 	names        map[string]string
+	statuses     map[string]*StatusEntry
 	phone        string
 	calls        []CallRecord
 	snapshotPath string
+	dirty        bool
 }
 
-const maxMessages = 2000
+const maxMessages = 5000
 const maxCalls = 300
+
+// HistoryPath returns the persisted snapshot location for a config.
+func HistoryPath(cfg *Config) string {
+	return filepath.Join(filepath.Dir(cfg.DBPath), "history.json")
+}
 
 // NewHistoryStore loads (or initializes) the store from <dbdir>/history.json.
 func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
-	path := filepath.Join(filepath.Dir(cfg.DBPath), "history.json")
+	path := HistoryPath(cfg)
 	s := &HistoryStore{
 		chats:        make(map[string]*conversation),
 		names:        make(map[string]string),
+		statuses:     make(map[string]*StatusEntry),
 		snapshotPath: path,
 	}
 	if b, err := os.ReadFile(path); err == nil {
@@ -97,6 +119,13 @@ func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
 			}
 			s.chats = snap.Chats
 			s.names = snap.Names
+			s.statuses = make(map[string]*StatusEntry)
+			for i := range snap.Statuses {
+				e := snap.Statuses[i]
+				if e.Sender != "" {
+					s.statuses[e.Sender] = &e
+				}
+			}
 			s.phone = snap.Phone
 			s.calls = snap.Calls
 		}
@@ -104,15 +133,38 @@ func NewHistoryStore(cfg *Config) (*HistoryStore, error) {
 	return s, nil
 }
 
-// Flush persists the store to history.json (best-effort, like store.rs::flush).
+// Flush persists the store to history.json (best-effort, like store.rs::flush)
+// and clears the dirty flag.
 func (s *HistoryStore) Flush() {
 	s.mu.Lock()
-	snap := snapshot{Chats: s.chats, Names: s.names, Phone: s.phone, Calls: s.calls}
+	snap := snapshot{Chats: s.chats, Names: s.names, Phone: s.phone, Calls: s.calls, Statuses: s.StatusesLocked()}
+	s.dirty = false
 	s.mu.Unlock()
 	if b, err := json.Marshal(&snap); err == nil {
 		_ = os.MkdirAll(filepath.Dir(s.snapshotPath), 0o755)
 		_ = os.WriteFile(s.snapshotPath, b, 0o644)
 	}
+}
+
+// NeedsFlush reports whether the store has unpersisted changes since the last
+// Flush (used by the periodic auto-flush ticker).
+func (s *HistoryStore) NeedsFlush() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dirty
+}
+
+// ResetSeed clears all stored chat messages so a fresh WhatsApp history sync
+// (or live traffic) starts from a clean store. Only used to drop demo/seed
+// data; the phone number is preserved.
+func (s *HistoryStore) ResetSeed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chats = make(map[string]*conversation)
+	s.names = make(map[string]string)
+	s.statuses = make(map[string]*StatusEntry)
+	s.calls = nil
+	s.dirty = true
 }
 
 // SetName stores a display name for a JID.
@@ -123,6 +175,7 @@ func (s *HistoryStore) SetName(jid, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.names[jid] = name
+	s.dirty = true
 }
 
 // SetPhone records the linked phone number.
@@ -130,6 +183,7 @@ func (s *HistoryStore) SetPhone(phone string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.phone = phone
+	s.dirty = true
 }
 
 // UpsertChatMeta updates name/unread/pinned for a chat.
@@ -148,9 +202,12 @@ func (s *HistoryStore) UpsertChatMeta(chat, name string, unread int, pinned bool
 		conv.Unread = unread
 	}
 	conv.Pinned = pinned
+	s.dirty = true
 }
 
 // UpsertMessage inserts or updates a message (same merge rules as store.rs).
+// Messages are kept sorted by timestamp so chat ordering, previews and the
+// newest-first chat list stay correct regardless of arrival order.
 func (s *HistoryStore) UpsertMessage(msg Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -170,14 +227,16 @@ func (s *HistoryStore) UpsertMessage(msg Message) {
 			if msg.Media != nil {
 				conv.Messages[i].Media = msg.Media
 			}
+			s.dirty = true
 			return
 		}
 	}
 	conv.Messages = append(conv.Messages, msg)
+	sort.SliceStable(conv.Messages, func(i, j int) bool { return conv.Messages[i].Time < conv.Messages[j].Time })
 	if len(conv.Messages) > maxMessages {
-		overflow := len(conv.Messages) - maxMessages
-		conv.Messages = conv.Messages[overflow:]
+		conv.Messages = conv.Messages[len(conv.Messages)-maxMessages:]
 	}
+	s.dirty = true
 }
 
 // BumpUnread increments the unread count.
@@ -190,6 +249,7 @@ func (s *HistoryStore) BumpUnread(chat string) {
 		s.chats[chat] = conv
 	}
 	conv.Unread++
+	s.dirty = true
 }
 
 // MarkRead zeroes the unread count.
@@ -198,6 +258,7 @@ func (s *HistoryStore) MarkRead(chat string) {
 	defer s.mu.Unlock()
 	if conv := s.chats[chat]; conv != nil {
 		conv.Unread = 0
+		s.dirty = true
 	}
 }
 
@@ -209,6 +270,7 @@ func (s *HistoryStore) SetStatus(chat, id, status string) {
 		for i := range conv.Messages {
 			if conv.Messages[i].ID == id {
 				conv.Messages[i].Status = status
+				s.dirty = true
 				return
 			}
 		}
@@ -227,6 +289,7 @@ func (s *HistoryStore) AddReaction(chat, id, reaction string) {
 				} else {
 					conv.Messages[i].Reactions = []string{reaction}
 				}
+				s.dirty = true
 				return
 			}
 		}
@@ -254,6 +317,20 @@ func (s *HistoryStore) MessageCount(chat string) int {
 	return 0
 }
 
+// OldestMessage returns the oldest stored message for a chat (messages are kept
+// time-ascending), or nil when the chat has none. Used to anchor on-demand
+// history backfill requests.
+func (s *HistoryStore) OldestMessage(chat string) *Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conv := s.chats[chat]
+	if conv == nil || len(conv.Messages) == 0 {
+		return nil
+	}
+	m := conv.Messages[0]
+	return &m
+}
+
 // Phone returns the linked phone number.
 func (s *HistoryStore) Phone() string {
 	s.mu.Lock()
@@ -271,6 +348,7 @@ func (s *HistoryStore) AddCall(rec CallRecord) {
 	for i := range s.calls {
 		if s.calls[i].ID == rec.ID {
 			s.calls[i] = rec
+			s.dirty = true
 			return
 		}
 	}
@@ -278,6 +356,7 @@ func (s *HistoryStore) AddCall(rec CallRecord) {
 	if len(s.calls) > maxCalls {
 		s.calls = s.calls[len(s.calls)-maxCalls:]
 	}
+	s.dirty = true
 }
 
 // MarkCallAnswered flips a recorded incoming call from missed to answered.
@@ -287,9 +366,55 @@ func (s *HistoryStore) MarkCallAnswered(id string) {
 	for i := range s.calls {
 		if s.calls[i].ID == id {
 			s.calls[i].Missed = false
+			s.dirty = true
 			return
 		}
 	}
+}
+
+// AddStatus records (or replaces) a contact's latest status update.
+func (s *HistoryStore) AddStatus(entry StatusEntry) {
+	if entry.Sender == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses[entry.Sender] = &entry
+	s.dirty = true
+}
+
+// AddStatusIfNewer records a status update only when it is newer than the one
+// already stored for the sender (used for history-sync backfill, where status
+// messages can arrive out of order).
+func (s *HistoryStore) AddStatusIfNewer(entry StatusEntry) {
+	if entry.Sender == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.statuses[entry.Sender]; ok && cur.Time >= entry.Time {
+		return
+	}
+	s.statuses[entry.Sender] = &entry
+	s.dirty = true
+}
+
+// Statuses returns the latest status per contact, newest first (same shape as
+// the store.rs status list).
+func (s *HistoryStore) Statuses() []StatusEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.StatusesLocked()
+}
+
+// StatusesLocked builds the sorted status list; caller must hold s.mu.
+func (s *HistoryStore) StatusesLocked() []StatusEntry {
+	out := make([]StatusEntry, 0, len(s.statuses))
+	for _, e := range s.statuses {
+		out = append(out, *e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time > out[j].Time })
+	return out
 }
 
 // Calls returns the call history sorted newest-first (same shape as store.rs).
@@ -309,6 +434,11 @@ func (s *HistoryStore) Chats() []ChatSummary {
 	defer s.mu.Unlock()
 	out := make([]ChatSummary, 0, len(s.chats))
 	for jid, conv := range s.chats {
+		// Status posts (status@broadcast) are surfaced in the Status tab, not
+		// as a normal chat in the Chats list.
+		if strings.HasSuffix(jid, "@broadcast") {
+			continue
+		}
 		var last *Message
 		if n := len(conv.Messages); n > 0 {
 			last = &conv.Messages[n-1]
